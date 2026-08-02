@@ -5,4 +5,4 @@ just = "1"
 
 # To consume the CLI itself (in your own project), add:
 #   [tools]
-#   "ubi:tbobm/dont-burn-it-all" = "latest"
+#   "github:tbobm/dont-burn-it-all" = { version = "latest", exe = "burn" }
