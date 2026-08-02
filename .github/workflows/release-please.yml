@@ -39,3 +39,14 @@ jobs:
       - if: ${{ steps.release.outputs.releases_created == 'true' }}
         name: Build and push release image
         run: ko build --bare --tags "v${{ steps.release.outputs['.--version'] }},latest" .
+
+      # Prebuilt per-platform binaries for `mise use ubi:tbobm/dont-burn-it-all`.
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        uses: extractions/setup-just@v2
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        name: Build and upload release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          just dist
+          gh release upload "${{ steps.release.outputs['.--tag_name'] }}" dist/*.tar.gz dist/checksums.txt --clobber

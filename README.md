@@ -24,11 +24,33 @@ This tool defends against that three ways:
 
 ## Install
 
+### With mise (prebuilt binary)
+
+Each release publishes per-platform binaries, installable via [mise](https://mise.jdx.dev)'s `ubi`
+backend — no Go toolchain needed:
+
 ```sh
-go build -o burn .
-./burn setup    # self-check: claude on PATH, token, billing-risk vars, endpoint, dirs
+mise use -g "ubi:tbobm/dont-burn-it-all@0.2.0"   # pin a version (or @latest)
+mise ls-remote "ubi:tbobm/dont-burn-it-all"      # list available versions
+burn setup
+```
+
+Or pin it per-project in `.mise.toml`:
+
+```toml
+[tools]
+"ubi:tbobm/dont-burn-it-all" = "0.2.0"
+```
+
+### From source
+
+```sh
+go build -o burn .   # or: just build
+./burn setup         # self-check: claude on PATH, token, billing-risk vars, endpoint, dirs
 # optional: export CLAUDE_CODE_OAUTH_TOKEN=$(claude setup-token)   # forces subscription auth
 ```
+
+Contributors can get the dev toolchain (Go + just) with `mise install`.
 
 `burn setup` prints a checklist and exits non-zero on any hard failure. The OAuth token is read
 (in order) from `CLAUDE_CODE_OAUTH_TOKEN`, the macOS Keychain entry `Claude Code-credentials`, or
@@ -108,6 +130,8 @@ approve or discard. To prep several PRs at once, run one launch per PR (each wit
 - **Versioning** is automated with [release-please](https://github.com/googleapis/release-please)
   from Conventional Commits: it maintains a release PR + `CHANGELOG.md` and, on merge, tags a
   version and bumps `.claude-plugin/plugin.json`.
+- **Release binaries** (per-OS/arch `.tar.gz` + `checksums.txt`) are built with `just dist` and
+  attached to each GitHub release — consumed by mise's `ubi` backend.
 - **Container images** are built with [ko](https://ko.build) and pushed to GHCR:
   - nightly on `main` → `ghcr.io/tbobm/dont-burn-it-all:nightly`
   - on release → `ghcr.io/tbobm/dont-burn-it-all:vX.Y.Z` and `:latest`

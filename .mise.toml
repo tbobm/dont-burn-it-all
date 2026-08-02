@@ -1,0 +1,8 @@
+# Dev toolchain for contributors: `mise install`
+[tools]
+go = "1.24"
+just = "1"
+
+# To consume the CLI itself (in your own project), add:
+#   [tools]
+#   "ubi:tbobm/dont-burn-it-all" = "latest"
