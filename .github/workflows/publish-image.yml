@@ -1,0 +1,37 @@
+name: publish-image
+
+# Manually (re)publish a ko image for any ref — e.g. to backfill a version whose
+# release predated the automated build, or to rebuild latest.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: git ref to build (tag, branch, or sha)
+        required: true
+      image_tags:
+        description: comma-separated image tags to push
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ko:
+    runs-on: ubuntu-latest
+    env:
+      KO_DOCKER_REPO: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ko-build/setup-ko@v0.7
+      - name: Log in to ghcr.io
+        run: echo "${{ github.token }}" | ko login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Build and push image
+        run: ko build --bare --tags "${{ inputs.image_tags }}" .
