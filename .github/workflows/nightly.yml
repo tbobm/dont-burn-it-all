@@ -1,0 +1,27 @@
+name: nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC daily, builds the default branch (main)
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ko-nightly:
+    runs-on: ubuntu-latest
+    env:
+      KO_DOCKER_REPO: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: ko-build/setup-ko@v0.7
+      - name: Log in to ghcr.io
+        run: echo "${{ github.token }}" | ko login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - name: Build and push nightly image
+        run: ko build --bare --tags "nightly,nightly-$(date -u +%Y%m%d)" .

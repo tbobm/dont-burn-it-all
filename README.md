@@ -102,6 +102,20 @@ approve or discard. To prep several PRs at once, run one launch per PR (each wit
 - Burning also consumes your **weekly** limit (`seven_day`), surfaced in the output.
 - The goal is to *use* quota on real work up to a reserve — not to waste it.
 
+## CI / releases
+
+- **PRs** run `go vet` + `go test` (`.github/workflows/ci.yml`).
+- **Versioning** is automated with [release-please](https://github.com/googleapis/release-please)
+  from Conventional Commits: it maintains a release PR + `CHANGELOG.md` and, on merge, tags a
+  version and bumps `.claude-plugin/plugin.json`.
+- **Container images** are built with [ko](https://ko.build) and pushed to GHCR:
+  - nightly on `main` → `ghcr.io/tbobm/dont-burn-it-all:nightly`
+  - on release → `ghcr.io/tbobm/dont-burn-it-all:vX.Y.Z` and `:latest`
+
+```sh
+docker pull ghcr.io/tbobm/dont-burn-it-all:latest
+```
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
