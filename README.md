@@ -26,12 +26,13 @@ This tool defends against that three ways:
 
 ### With mise (prebuilt binary)
 
-Each release publishes per-platform binaries, installable via [mise](https://mise.jdx.dev)'s `ubi`
-backend — no Go toolchain needed:
+Each release publishes per-platform binaries, installable via [mise](https://mise.jdx.dev)'s
+`github` backend — no Go toolchain needed. The archive ships a `burn` binary, so pass
+`exe=burn`:
 
 ```sh
-mise use -g "ubi:tbobm/dont-burn-it-all@0.2.0"   # pin a version (or @latest)
-mise ls-remote "ubi:tbobm/dont-burn-it-all"      # list available versions
+mise use -g "github:tbobm/dont-burn-it-all[exe=burn]@0.2.0"   # pin a version (or @latest)
+mise ls-remote "github:tbobm/dont-burn-it-all"               # list available versions
 burn setup
 ```
 
@@ -39,7 +40,7 @@ Or pin it per-project in `.mise.toml`:
 
 ```toml
 [tools]
-"ubi:tbobm/dont-burn-it-all" = "0.2.0"
+"github:tbobm/dont-burn-it-all" = { version = "0.2.0", exe = "burn" }
 ```
 
 ### From source
@@ -131,7 +132,7 @@ approve or discard. To prep several PRs at once, run one launch per PR (each wit
   from Conventional Commits: it maintains a release PR + `CHANGELOG.md` and, on merge, tags a
   version and bumps `.claude-plugin/plugin.json`.
 - **Release binaries** (per-OS/arch `.tar.gz` + `checksums.txt`) are built with `just dist` and
-  attached to each GitHub release — consumed by mise's `ubi` backend.
+  attached to each GitHub release — consumed by mise's `github` backend.
 - **Container images** are built with [ko](https://ko.build) and pushed to GHCR:
   - nightly on `main` → `ghcr.io/tbobm/dont-burn-it-all:nightly`
   - on release → `ghcr.io/tbobm/dont-burn-it-all:vX.Y.Z` and `:latest`
