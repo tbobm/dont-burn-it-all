@@ -3,31 +3,43 @@ name: burn
 description: Use idle Claude Code subscription quota on real work up to a threshold, or monitor the 5-hour window. Use when the user says "burn quota", "use my remaining session", "prepare my reviews with burn", "watch my usage", or asks to set up/run the dont-burn-it-all tool in this repo.
 ---
 
-This repo builds `burn`, a CLI that spends your subscription 5-hour quota on real headless work and
-stops at a threshold. Drive it in three steps; never re-implement its logic in the loop.
+`burn` is a CLI that spends your subscription 5-hour quota on real headless work and stops at a
+threshold. Drive it in three steps; never re-implement its logic in the loop.
 
-## 1. Ensure it's built and configured
+## 1. Ensure `burn` is installed, then configured
+
+Locate the binary, preferring an installed one:
 
 ```sh
-test -x ./burn || go build -o ./burn .
-./burn setup
+command -v burn || { test -x ./burn && echo "./burn"; } || echo "MISSING"
 ```
 
-Relay the `setup` checklist. On any `[FAIL]` (no `claude`, no OAuth token, endpoint unreachable),
-report the remediation and STOP — do not try to burn. `[warn]` lines are fine to proceed past.
+If it prints `MISSING`, **ask the user how to install it** (do not install silently) and offer:
+
+- **mise (prebuilt, no Go):** `mise use -g "github:tbobm/dont-burn-it-all[exe=burn]@latest"`
+- **from source (in this repo):** `go build -o ./burn .` — then use `./burn`
+
+Once you have a working `burn` command, verify config and relay the checklist:
+
+```sh
+burn setup
+```
+
+On any `[FAIL]` (no `claude`, no OAuth token, endpoint unreachable), report the remediation and
+STOP — do not try to burn. `[warn]` lines are fine to proceed past.
 
 ## 2. Pick a mode
 
 - **Launch** (spend quota on a task): needs `--goal`. Each launch runs `--jobs` sessions to
   completion and stops — it does not loop. Start each launch deliberately.
   ```sh
-  ./burn --goal "<real task>" --jobs 4 --target 80
+  burn --goal "<real task>" --jobs 4 --target 80
   ```
   Sessions prompt for permissions unless you pass `--dangerously-skip-permissions` (opt-in;
   only with a throwaway `--workdir`).
 - **Watch** (governor only): polls usage every ~180s and notifies at the target, spawning nothing.
   ```sh
-  ./burn --watch --target 80
+  burn --watch --target 80
   ```
 
 The first launch runs a ~3-minute preflight proving sessions bill to the subscription (not API).
@@ -46,5 +58,5 @@ setup-token)`, unset `ANTHROPIC_API_KEY`) and stop.
   context — e.g. until the background job exits, or until the last line of
   `~/.claude/burn/worker.jsonl` shows `five_hour_before >= target`. Report when the condition trips.
 
-Pick a `--target` above the current 5-hour % (see `./burn --dry-run --goal x`); a target below it
+Pick a `--target` above the current 5-hour % (see `burn --dry-run --goal x`); a target below it
 makes launch refuse immediately by design.

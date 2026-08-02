@@ -1,145 +1,89 @@
 # dont-burn-it-all
 
-A small Go CLI (and Claude Code plugin) that **deliberately uses your Claude Code subscription's
-5-hour quota** by running real work in parallel headless sessions — and **stops at a threshold**
-so you keep a reserve instead of getting locked out.
+[![CI](https://github.com/tbobm/dont-burn-it-all/actions/workflows/ci.yml/badge.svg)](https://github.com/tbobm/dont-burn-it-all/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/tbobm/dont-burn-it-all?sort=semver)](https://github.com/tbobm/dont-burn-it-all/releases)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tbobm/dont-burn-it-all)](https://goreportcard.com/report/github.com/tbobm/dont-burn-it-all)
+[![License: MIT](https://img.shields.io/github/license/tbobm/dont-burn-it-all)](LICENSE)
 
-It meters against the **real Anthropic usage endpoint** (`/api/oauth/usage`, the same number
-`/usage` shows), not a local token estimate.
-
-## Why the preflight matters (read this)
-
-Under a Max/Pro login, `claude -p` only consumes your **subscription** window if no
-`ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` / Bedrock / Vertex is active. Otherwise it can
-**silently bill pay-per-token API** — which wouldn't move your 5-hour usage at all and *would*
-cost real money (documented cases of $1,800+ surprise bills from parallel `claude -p`).
-
-This tool defends against that three ways:
-
-1. **Refuses** to run if a billing-risk env var is set (override with `--i-know-this-bills-api`).
-2. **Scrubs** those vars from every session's environment and pins `CLAUDE_CODE_OAUTH_TOKEN`.
-3. **Preflight metering proof**: before any real session, it runs one probe and confirms your
-   real 5-hour utilization actually rose. If it didn't, it hard-aborts. (~3 minutes; skipped for
-   ~4h after a successful proof.)
+Spend your Claude Code **subscription** 5-hour quota on real work — many parallel headless
+`claude -p` sessions — and stop at a threshold so you keep a reserve. Metered against the real
+Anthropic usage endpoint, not a local estimate.
 
 ## Install
 
-### With mise (prebuilt binary)
+```sh
+# prebuilt binary via mise (no Go needed)
+mise use -g "github:tbobm/dont-burn-it-all[exe=burn]@latest"
 
-Each release publishes per-platform binaries, installable via [mise](https://mise.jdx.dev)'s
-`github` backend — no Go toolchain needed. The archive ships a `burn` binary, so pass
-`exe=burn`:
+# or from source
+go build -o burn .        # or: just build
+```
+
+## Quick start
 
 ```sh
-mise use -g "github:tbobm/dont-burn-it-all[exe=burn]@0.2.0"   # pin a version (or @latest)
-mise ls-remote "github:tbobm/dont-burn-it-all"               # list available versions
-burn setup
+burn setup                                    # verify config (claude, token, endpoint, dirs)
+burn --dry-run --goal test                    # print current 5h usage + planned jobs; run nothing
+burn --goal "write tests for pkg/foo" --jobs 4 --target 80   # spend quota up to 80%
+burn --watch --target 80                       # monitor only: notify when 5h usage hits 80%
 ```
 
-Or pin it per-project in `.mise.toml`:
+Each `--goal` launch runs `--jobs` sessions to completion and stops — you start each launch.
+Pick a `--target` above your current usage, or the launch refuses by design.
 
-```toml
-[tools]
-"github:tbobm/dont-burn-it-all" = { version = "0.2.0", exe = "burn" }
-```
-
-### From source
-
-```sh
-go build -o burn .   # or: just build
-./burn setup         # self-check: claude on PATH, token, billing-risk vars, endpoint, dirs
-# optional: export CLAUDE_CODE_OAUTH_TOKEN=$(claude setup-token)   # forces subscription auth
-```
-
-Contributors can get the dev toolchain (Go + just) with `mise install`.
-
-`burn setup` prints a checklist and exits non-zero on any hard failure. The OAuth token is read
-(in order) from `CLAUDE_CODE_OAUTH_TOKEN`, the macOS Keychain entry `Claude Code-credentials`, or
-`~/.claude/.credentials.json`.
-
-### As a Claude Code skill
-
-This repo ships a project skill at `.claude/skills/burn/`. In a Claude Code session inside the
-repo, ask to "burn quota" / "watch my usage" and Claude will build, run `burn setup`, and drive
-the CLI — including running it as a background sub-agent tracked with the Monitor tool so it
-doesn't block the session.
-
-## Usage
-
-```sh
-./burn --dry-run                                   # show usage %, auth source, planned jobs
-./burn --goal "write tests for pkg/foo" --jobs 4   # launch 4 parallel sessions toward one goal
-./burn --watch --target 25                         # governor: notify when 5h usage hits 25%
-```
-
-Each `--goal` launch runs `--jobs` sessions to completion and stops. It does not loop or refill —
-you start each launch yourself.
-
-### Example: "prepare my reviews"
-
-A good use of otherwise-idle quota: draft PR review comments in **pending** state so you can read
-and submit them yourself. Sessions run headless, so you pick the PR up front — the tool doesn't
-prompt mid-run.
-
-```sh
-# 1. List PRs waiting on you (do this yourself, or let your main Claude loop do it):
-gh pr list --search "review-requested:@me" --json number,title,url
-
-# 2. Launch a session to prepare comments for the one you chose. It creates a PENDING review
-#    (no `event` field) — nothing is submitted until you say so:
-./burn --jobs 1 --target 90 --dangerously-skip-permissions --goal '
-Review PR https://github.com/OWNER/REPO/pull/123.
-Read the diff with `gh pr diff 123`. Draft specific, line-anchored review comments.
-Create them as a PENDING review via:
-  gh api repos/OWNER/REPO/pulls/123/reviews -f body="..." -F "comments[][path]=..." \
-    -F "comments[][line]=..." -F "comments[][body]=..."
-Do NOT set an event / do NOT submit. Leave the review pending for me to read and send.'
-```
-
-The session does the reading and comment-drafting (using your quota); you get a pending review to
-approve or discard. To prep several PRs at once, run one launch per PR (each with its own goal) —
-`--jobs` copies of a *single* goal all target the same PR, so use separate launches for separate PRs.
-
-### Flags
+## Flags
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--target` | `25` | Refuse/notify once 5-hour utilization reaches this % |
 | `--jobs` | `1` | Parallel sessions per launch |
-| `--model` | `opus` | Model for sessions |
 | `--goal` | — | Task each session works on (required to launch) |
-| `--watch` | `false` | Governor mode: poll + notify, spawn nothing |
+| `--model` | `opus` | Model for sessions |
+| `--watch` | `false` | Monitor mode: poll + notify, spawn nothing |
 | `--workdir` | temp scratch dir | Where sessions run — a scratch dir, **not a real repo** |
 | `--store` | `~/.claude/burn/worker.jsonl` | JSONL log of sessions and readings |
 | `--max-turns` | `30` | Max agent turns per session |
-| `--max-usd-guard` | `0` (off) | Abort if reported cost exceeds this $ (subscription should stay ~$0) |
+| `--max-usd-guard` | `0` (off) | Abort if reported cost exceeds this $ |
+| `--dangerously-skip-permissions` | `false` | Run sessions unattended (opt-in) |
 | `--i-know-this-bills-api` | `false` | Override the billing-risk env refusal |
-| `--dangerously-skip-permissions` | `false` | Opt in to unattended sessions (no per-tool approval) |
 | `--dry-run` | `false` | Print state, spawn nothing |
 
-## Cautions
+## Safety
 
-- Sessions ask for tool permission by default. Pass `--dangerously-skip-permissions` to run them
-  fully unattended — and only then keep `--workdir` a throwaway dir, since sessions act without
-  approval.
-- Burning also consumes your **weekly** limit (`seven_day`), surfaced in the output.
-- The goal is to *use* quota on real work up to a reserve — not to waste it.
+`burn` only spends **subscription** quota, never pay-per-token API. It refuses to run when a
+billing-risk env var (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, Bedrock/Vertex) is set, scrubs
+them from every session, and runs a one-time preflight that proves a probe actually moves your
+5-hour usage before launching real work. Sessions are interactive unless you pass
+`--dangerously-skip-permissions` — only do that with a throwaway `--workdir`.
 
-## CI / releases
+## Example: prepare pending PR reviews
 
-- **PRs** run `go vet` + `go test` (`.github/workflows/ci.yml`).
-- **Versioning** is automated with [release-please](https://github.com/googleapis/release-please)
-  from Conventional Commits: it maintains a release PR + `CHANGELOG.md` and, on merge, tags a
-  version and bumps `.claude-plugin/plugin.json`.
-- **Release binaries** (per-OS/arch `.tar.gz` + `checksums.txt`) are built with `just dist` and
-  attached to each GitHub release — consumed by mise's `github` backend.
-- **Container images** are built with [ko](https://ko.build) and pushed to GHCR:
-  - nightly on `main` → `ghcr.io/tbobm/dont-burn-it-all:nightly`
-  - on release → `ghcr.io/tbobm/dont-burn-it-all:vX.Y.Z` and `:latest`
+Spend idle quota drafting review comments in **pending** state (nothing submitted):
 
 ```sh
-docker pull ghcr.io/tbobm/dont-burn-it-all:latest
+burn --jobs 1 --target 90 --dangerously-skip-permissions --goal '
+Review PR https://github.com/OWNER/REPO/pull/123 (`gh pr diff 123`). Draft line-anchored
+comments and create them as a PENDING review via `gh api .../pulls/123/reviews` with no
+event — do NOT submit.'
 ```
+
+## Claude Code plugin
+
+Ships a `/burn` slash command and a project skill (`.claude/skills/burn/`). Inside a Claude Code
+session in this repo, say "burn quota" / "watch my usage" — the skill installs `burn` if missing,
+runs `burn setup`, and drives it (optionally as a background sub-agent tracked with Monitor).
+
+## Development
+
+```sh
+mise install      # dev toolchain (Go + just)
+just vet test     # go vet + go test
+just dist         # cross-build release archives into dist/
+```
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please)
+(Conventional Commits): a merged release PR tags a version, attaches per-platform binaries, and
+publishes a [ko](https://ko.build) image to `ghcr.io/tbobm/dont-burn-it-all`.
 
 ## License
 
