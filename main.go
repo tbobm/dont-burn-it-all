@@ -40,6 +40,10 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		return setup()
+	}
+
 	home, _ := os.UserHomeDir()
 	cfg := Config{}
 	flag.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
