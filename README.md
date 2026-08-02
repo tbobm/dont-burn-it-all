@@ -26,11 +26,20 @@ This tool defends against that three ways:
 
 ```sh
 go build -o burn .
+./burn setup    # self-check: claude on PATH, token, billing-risk vars, endpoint, dirs
 # optional: export CLAUDE_CODE_OAUTH_TOKEN=$(claude setup-token)   # forces subscription auth
 ```
 
-The OAuth token is read (in order) from `CLAUDE_CODE_OAUTH_TOKEN`, the macOS Keychain entry
-`Claude Code-credentials`, or `~/.claude/.credentials.json`.
+`burn setup` prints a checklist and exits non-zero on any hard failure. The OAuth token is read
+(in order) from `CLAUDE_CODE_OAUTH_TOKEN`, the macOS Keychain entry `Claude Code-credentials`, or
+`~/.claude/.credentials.json`.
+
+### As a Claude Code skill
+
+This repo ships a project skill at `.claude/skills/burn/`. In a Claude Code session inside the
+repo, ask to "burn quota" / "watch my usage" and Claude will build, run `burn setup`, and drive
+the CLI — including running it as a background sub-agent tracked with the Monitor tool so it
+doesn't block the session.
 
 ## Usage
 
