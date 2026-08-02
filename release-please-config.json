@@ -4,6 +4,7 @@
     ".": {
       "release-type": "go",
       "package-name": "dont-burn-it-all",
+      "include-component-in-tag": false,
       "extra-files": [
         {
           "type": "json",
