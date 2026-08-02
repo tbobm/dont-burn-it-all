@@ -7,12 +7,35 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  packages: write
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    env:
+      KO_DOCKER_REPO: ghcr.io/${{ github.repository }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+      # ko runs here, in the same job that cut the release. A release created by
+      # release-please uses GITHUB_TOKEN, which does NOT trigger a separate
+      # `on: release` workflow — so the image build must live here.
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        uses: actions/checkout@v4
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        uses: ko-build/setup-ko@v0.7
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        name: Log in to ghcr.io
+        run: echo "${{ github.token }}" | ko login ghcr.io --username "${{ github.actor }}" --password-stdin
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        name: Build and push release image
+        run: ko build --bare --tags "v${{ steps.release.outputs['.--version'] }},latest" .
