@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/tbobm/dont-burn-it-all/compare/v0.3.0...v0.3.1) (2026-08-02)
+
+
+### Bug Fixes
+
+* read release version from manifest, not brittle release-please output ([#8](https://github.com/tbobm/dont-burn-it-all/issues/8)) ([a8bcad7](https://github.com/tbobm/dont-burn-it-all/commit/a8bcad7634c9df655bc5cbe3f6039e24889386e3))
+
 ## [0.3.0](https://github.com/tbobm/dont-burn-it-all/compare/v0.2.0...v0.3.0) (2026-08-02)
 
 
