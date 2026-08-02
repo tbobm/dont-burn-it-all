@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/tbobm/dont-burn-it-all/compare/v0.2.0...v0.3.0) (2026-08-02)
+
+
+### Features
+
+* publish release binaries for mise ubi backend ([#5](https://github.com/tbobm/dont-burn-it-all/issues/5)) ([54e64db](https://github.com/tbobm/dont-burn-it-all/commit/54e64dbc6c18ebf1902dee657bb3ff9e028ba118))
+
 ## [0.2.0](https://github.com/tbobm/dont-burn-it-all/compare/dont-burn-it-all-v0.1.0...dont-burn-it-all-v0.2.0) (2026-08-02)
 
 
