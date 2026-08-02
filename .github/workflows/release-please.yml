@@ -26,6 +26,12 @@ jobs:
       # `on: release` workflow — so the image build must live here.
       - if: ${{ steps.release.outputs.releases_created == 'true' }}
         uses: actions/checkout@v4
+      # Read the version from the manifest (just bumped on main by the release
+      # commit). release-please's per-path outputs are brittle; the manifest is
+      # the source of truth and yields a clean "v0.3.0" tag.
+      - if: ${{ steps.release.outputs.releases_created == 'true' }}
+        id: v
+        run: echo "tag=v$(jq -r '.["."]' .release-please-manifest.json)" >> "$GITHUB_OUTPUT"
       - if: ${{ steps.release.outputs.releases_created == 'true' }}
         uses: actions/setup-go@v5
         with:
@@ -38,9 +44,9 @@ jobs:
         run: echo "${{ github.token }}" | ko login ghcr.io --username "${{ github.actor }}" --password-stdin
       - if: ${{ steps.release.outputs.releases_created == 'true' }}
         name: Build and push release image
-        run: ko build --bare --tags "v${{ steps.release.outputs['.--version'] }},latest" .
+        run: ko build --bare --tags "${{ steps.v.outputs.tag }},latest" .
 
-      # Prebuilt per-platform binaries for `mise use ubi:tbobm/dont-burn-it-all`.
+      # Prebuilt per-platform binaries for mise's github backend.
       - if: ${{ steps.release.outputs.releases_created == 'true' }}
         uses: extractions/setup-just@v2
       - if: ${{ steps.release.outputs.releases_created == 'true' }}
@@ -49,4 +55,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           just dist
-          gh release upload "${{ steps.release.outputs['.--tag_name'] }}" dist/*.tar.gz dist/checksums.txt --clobber
+          gh release upload "${{ steps.v.outputs.tag }}" dist/*.tar.gz dist/checksums.txt --clobber
