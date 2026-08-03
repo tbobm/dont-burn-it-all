@@ -48,6 +48,19 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | `--i-know-this-bills-api` | `false` | Override the billing-risk env refusal |
 | `--dry-run` | `false` | Print state, spawn nothing |
 
+## Notifications
+
+By default a target hit rings the terminal bell, prints `NOTICE:`, and shows a
+macOS notification. Set `BURN_NOTIFY_CMD` to forward it anywhere — the command
+runs via `sh -c` with the message in `$BURN_MSG`:
+
+```sh
+# post to a webhook / another agent's inbox
+BURN_NOTIFY_CMD='curl -s -XPOST localhost:6767/inbox -d "$BURN_MSG"' burn --watch --target 80
+# or Slack
+BURN_NOTIFY_CMD='curl -s -XPOST "$SLACK_WEBHOOK" -d "{\"text\":\"$BURN_MSG\"}"' burn --watch --target 80
+```
+
 ## Safety
 
 `burn` only spends **subscription** quota, never pay-per-token API. It refuses to run when a

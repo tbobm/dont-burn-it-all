@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -55,5 +57,20 @@ func TestCredsBlobParse(t *testing.T) {
 	}
 	if b.ClaudeAiOauth.AccessToken != "sk-ant-oat01-abc" {
 		t.Fatalf("got %q", b.ClaudeAiOauth.AccessToken)
+	}
+}
+
+// BURN_NOTIFY_CMD must run with the alert message exposed in $BURN_MSG so it can
+// be forwarded to a webhook, Slack, or another agent's inbox.
+func TestNotifyCmdReceivesMessage(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "msg")
+	t.Setenv("BURN_NOTIFY_CMD", "printf '%s' \"$BURN_MSG\" > "+out)
+	notify("reserve hit 80%")
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("notify-cmd did not run: %v", err)
+	}
+	if string(got) != "reserve hit 80%" {
+		t.Fatalf("BURN_MSG = %q, want %q", got, "reserve hit 80%")
 	}
 }
