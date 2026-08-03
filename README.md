@@ -55,10 +55,10 @@ macOS notification. Set `BURN_NOTIFY_CMD` to forward it anywhere — the command
 runs via `sh -c` with the message in `$BURN_MSG`:
 
 ```sh
-# post to a webhook / another agent's inbox
-BURN_NOTIFY_CMD='curl -s -XPOST localhost:6767/inbox -d "$BURN_MSG"' burn --watch --target 80
-# or Slack
+# Slack incoming webhook
 BURN_NOTIFY_CMD='curl -s -XPOST "$SLACK_WEBHOOK" -d "{\"text\":\"$BURN_MSG\"}"' burn --watch --target 80
+# append to a file another process tails
+BURN_NOTIFY_CMD='echo "$BURN_MSG" >> ~/.claude/burn/alerts.log' burn --watch --target 80
 ```
 
 ## Safety
