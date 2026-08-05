@@ -69,9 +69,16 @@ event — do NOT submit.'
 
 ## Claude Code plugin
 
-Ships a `/burn` slash command and a project skill (`.claude/skills/burn/`). Inside a Claude Code
-session in this repo, say "burn quota" / "watch my usage" — the skill installs `burn` if missing,
-runs `burn setup`, and drives it (optionally as a background sub-agent tracked with Monitor).
+Ships a `/burn` slash command and a project skill (`.claude/skills/burn/`). Install it from any
+Claude Code session — the repo is its own marketplace:
+
+```sh
+/plugin marketplace add tbobm/dont-burn-it-all
+/plugin install dont-burn-it-all@dont-burn-it-all
+```
+
+Then say "burn quota" / "watch my usage" — the skill installs `burn` if missing, runs
+`burn setup`, and drives it (optionally as a background sub-agent tracked with Monitor).
 
 ## Development
 

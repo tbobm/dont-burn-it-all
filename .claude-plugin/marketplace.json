@@ -1,0 +1,17 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "dont-burn-it-all",
+  "description": "Spend your Claude Code subscription 5-hour quota on real parallel work, stopping at a threshold.",
+  "owner": {
+    "name": "tbobm",
+    "url": "https://github.com/tbobm"
+  },
+  "plugins": [
+    {
+      "name": "dont-burn-it-all",
+      "description": "Meter and deliberately spend 5-hour subscription quota with parallel headless sessions.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
