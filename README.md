@@ -26,6 +26,7 @@ burn setup                                    # verify config (claude, token, en
 burn run --dry-run --goal test                # print current 5h usage + planned jobs; run nothing
 burn run --goal "write tests for pkg/foo" --jobs 4 --target 80   # spend quota up to 80%
 burn run --watch --target 80                   # monitor only: notify when 5h usage hits 80%
+burn run --target 60 --weekly-target 40 --goal "..."   # stop at 60% of 5h AND 40% of 7d, whichever hits first
 burn overview                                  # summarize past sessions: cost, turns, errors, time spent
 burn connect jira --jql 'project = DEMO AND status = "To Refine"'   # list matching Jira issues
 ```
@@ -41,6 +42,7 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--target` | `25` | Refuse/notify once 5-hour utilization reaches this % |
+| `--weekly-target` | `0` | Refuse/notify once 7-day utilization reaches this % (0 disables) |
 | `--jobs` | `1` | Parallel sessions per launch |
 | `--goal` | — | Task each session works on (required to launch) |
 | `--model` | `opus` | Model for sessions |

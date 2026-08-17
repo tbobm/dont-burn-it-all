@@ -260,6 +260,74 @@ func TestShutdownSandboxesWaitsForInFlightCreate(t *testing.T) {
 	}
 }
 
+func TestBreachMessage(t *testing.T) {
+	cases := []struct {
+		name            string
+		u               Usage
+		target          float64
+		weeklyTarget    float64
+		wantEmpty       bool
+		wantFiveHourMsg bool
+		wantWeeklyMsg   bool
+	}{
+		{
+			name:         "both under threshold",
+			u:            Usage{FiveHour: Window{Utilization: 10}, SevenDay: Window{Utilization: 10}},
+			target:       25,
+			weeklyTarget: 40,
+			wantEmpty:    true,
+		},
+		{
+			name:            "five-hour at/over target, weekly disabled",
+			u:               Usage{FiveHour: Window{Utilization: 25}, SevenDay: Window{Utilization: 99}},
+			target:          25,
+			weeklyTarget:    0,
+			wantFiveHourMsg: true,
+		},
+		{
+			name:            "five-hour at/over target, weekly under",
+			u:               Usage{FiveHour: Window{Utilization: 30}, SevenDay: Window{Utilization: 10}},
+			target:          25,
+			weeklyTarget:    40,
+			wantFiveHourMsg: true,
+		},
+		{
+			name:          "five-hour under, weekly at/over",
+			u:             Usage{FiveHour: Window{Utilization: 10}, SevenDay: Window{Utilization: 40}},
+			target:        25,
+			weeklyTarget:  40,
+			wantWeeklyMsg: true,
+		},
+		{
+			name:         "weeklyTarget 0 with SevenDay at 99, five-hour under",
+			u:            Usage{FiveHour: Window{Utilization: 10}, SevenDay: Window{Utilization: 99}},
+			target:       25,
+			weeklyTarget: 0,
+			wantEmpty:    true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := breachMessage(tc.u, tc.target, tc.weeklyTarget)
+			if tc.wantEmpty && got != "" {
+				t.Fatalf("expected empty string, got %q", got)
+			}
+			if tc.wantFiveHourMsg {
+				if !strings.Contains(got, "5-hour") {
+					t.Fatalf("expected 5-hour message, got %q", got)
+				}
+				if strings.Contains(got, "7-day") || strings.Contains(got, "weekly-target") {
+					t.Fatalf("weekly message must not appear, got %q", got)
+				}
+			}
+			if tc.wantWeeklyMsg && !strings.Contains(got, "7-day") {
+				t.Fatalf("expected 7-day/weekly message, got %q", got)
+			}
+		})
+	}
+}
+
 func TestCredsBlobParse(t *testing.T) {
 	raw := `{"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc","refreshToken":"x","expiresAt":1}}`
 	var b credsBlob

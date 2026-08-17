@@ -22,6 +22,7 @@ import (
 // Config holds all `run` subcommand options.
 type Config struct {
 	Target          float64
+	WeeklyTarget    float64
 	Jobs            int
 	Model           string
 	Goal            string
@@ -141,6 +142,7 @@ func cmdRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfg := Config{}
 	fs.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
+	fs.Float64Var(&cfg.WeeklyTarget, "weekly-target", 0, "stop/refuse once 7-day utilization reaches this percent; 0 disables")
 	fs.IntVar(&cfg.Jobs, "jobs", 1, "number of parallel sessions to launch")
 	fs.StringVar(&cfg.Model, "model", "opus", "model for launched sessions (opus|sonnet|haiku|id)")
 	fs.StringVar(&cfg.Goal, "goal", "", "the task each session works on (required for launch)")
@@ -193,6 +195,18 @@ func cmdSetup(args []string) error {
 	return setup(sandboxImage)
 }
 
+// breachMessage returns a non-empty reason once usage is at/over a threshold, checking the
+// 5-hour window first, then the 7-day window (weeklyTarget <= 0 disables that check).
+func breachMessage(u Usage, target, weeklyTarget float64) string {
+	if u.FiveHour.Utilization >= target {
+		return fmt.Sprintf("5-hour usage %.1f%% >= target %.1f%%", u.FiveHour.Utilization, target)
+	}
+	if weeklyTarget > 0 && u.SevenDay.Utilization >= weeklyTarget {
+		return fmt.Sprintf("7-day usage %.1f%% >= weekly-target %.1f%%", u.SevenDay.Utilization, weeklyTarget)
+	}
+	return ""
+}
+
 func dryRun(cfg Config, uc *UsageClient) error {
 	// Run the same validation a real launch would hit (--jobs>1 refusal, repo
 	// resolution) so dry-run actually previews what doLaunch will do.
@@ -216,6 +230,11 @@ func dryRun(cfg Config, uc *UsageClient) error {
 	fmt.Printf("5-hour usage      : %.1f%% (resets %s)\n", u.FiveHour.Utilization, u.FiveHour.ResetsAt)
 	fmt.Printf("7-day usage       : %.1f%%\n", u.SevenDay.Utilization)
 	fmt.Printf("target            : %.1f%%\n", cfg.Target)
+	if cfg.WeeklyTarget > 0 {
+		fmt.Printf("weekly target     : %.1f%%\n", cfg.WeeklyTarget)
+	} else {
+		fmt.Printf("weekly target     : %.1f%% (disabled)\n", cfg.WeeklyTarget)
+	}
 	fmt.Printf("planned           : %d session(s) of model %q in %s\n", cfg.Jobs, cfg.Model, target)
 	fmt.Printf("goal              : %q\n", cfg.Goal)
 	return nil
@@ -234,9 +253,8 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 	if err != nil {
 		return err
 	}
-	if u.FiveHour.Utilization >= cfg.Target {
-		return fmt.Errorf("at/over target: 5-hour usage %.1f%% >= target %.1f%% — stop starting sessions",
-			u.FiveHour.Utilization, cfg.Target)
+	if reason := breachMessage(u, cfg.Target, cfg.WeeklyTarget); reason != "" {
+		return fmt.Errorf("at/over threshold: %s — stop starting sessions", reason)
 	}
 	if err := os.MkdirAll(cfg.Workdir, 0o755); err != nil {
 		return err
@@ -262,7 +280,11 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 }
 
 func watch(cfg Config, uc *UsageClient, store *Store) error {
-	fmt.Printf("watching 5-hour usage; will notify at target %.1f%% (poll every %s)\n", cfg.Target, minPollInterval)
+	weeklySuffix := ""
+	if cfg.WeeklyTarget > 0 {
+		weeklySuffix = fmt.Sprintf(", weekly-target %.1f%%", cfg.WeeklyTarget)
+	}
+	fmt.Printf("watching 5-hour usage; will notify at target %.1f%%%s (poll every %s)\n", cfg.Target, weeklySuffix, minPollInterval)
 	first := true
 	for {
 		var u Usage
@@ -283,8 +305,8 @@ func watch(cfg Config, uc *UsageClient, store *Store) error {
 			SevenDay:       u.SevenDay.Utilization,
 		})
 		fmt.Printf("[%s] 5h %.1f%%  7d %.1f%%\n", time.Now().Format("15:04:05"), u.FiveHour.Utilization, u.SevenDay.Utilization)
-		if u.FiveHour.Utilization >= cfg.Target {
-			notify(fmt.Sprintf("5-hour usage %.1f%% reached target %.1f%% — stop starting sessions", u.FiveHour.Utilization, cfg.Target))
+		if reason := breachMessage(u, cfg.Target, cfg.WeeklyTarget); reason != "" {
+			notify(reason + " — stop starting sessions")
 			return nil
 		}
 	}
