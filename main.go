@@ -38,6 +38,7 @@ type Config struct {
 var commandHelp = map[string]string{
 	"run":      "launch or watch sessions against the subscription 5-hour quota",
 	"overview": "summarize past burn activity from the JSONL store",
+	"connect":  "verify/query an external data source (e.g. jira)",
 	"setup":    "check burn's configuration (claude, token, endpoint, dirs)",
 }
 
@@ -62,7 +63,7 @@ func resolveCommand(args []string) (name string, rest []string) {
 	switch args[0] {
 	case "-h", "--help", "help":
 		return "help", nil
-	case "run", "setup", "overview":
+	case "run", "setup", "overview", "connect":
 		return args[0], args[1:]
 	default:
 		if strings.HasPrefix(args[0], "-") {
@@ -84,6 +85,8 @@ func dispatch(args []string) error {
 		return setup()
 	case "overview":
 		return cmdOverview(rest)
+	case "connect":
+		return cmdConnect(rest)
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])

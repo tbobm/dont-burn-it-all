@@ -18,6 +18,8 @@ func TestResolveCommand(t *testing.T) {
 		{"setup", []string{"setup"}, "setup", []string{}},
 		{"overview bare", []string{"overview"}, "overview", []string{}},
 		{"overview with flags", []string{"overview", "--json"}, "overview", []string{"--json"}},
+		{"connect jira", []string{"connect", "jira", "--jql", "q"}, "connect", []string{"jira", "--jql", "q"}},
+		{"connect bare", []string{"connect"}, "connect", []string{}},
 		{"short help", []string{"-h"}, "help", nil},
 		{"long help", []string{"--help"}, "help", nil},
 		{"help word", []string{"help"}, "help", nil},
