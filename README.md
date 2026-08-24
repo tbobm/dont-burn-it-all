@@ -23,15 +23,20 @@ go build -o burn .        # or: just build
 
 ```sh
 burn setup                                    # verify config (claude, token, endpoint, dirs)
-burn --dry-run --goal test                    # print current 5h usage + planned jobs; run nothing
-burn --goal "write tests for pkg/foo" --jobs 4 --target 80   # spend quota up to 80%
-burn --watch --target 80                       # monitor only: notify when 5h usage hits 80%
+burn run --dry-run --goal test                # print current 5h usage + planned jobs; run nothing
+burn run --goal "write tests for pkg/foo" --jobs 4 --target 80   # spend quota up to 80%
+burn run --watch --target 80                   # monitor only: notify when 5h usage hits 80%
+burn overview                                  # summarize past sessions: cost, turns, errors, time spent
+burn connect jira --jql 'project = SUDS AND status = "To Refine"'   # list matching Jira issues
 ```
+
+`burn <command>` dispatches to a subcommand (`run`, `overview`, `connect`, `setup`); bare
+`burn --goal ...` / `burn --dry-run ...` (no subcommand keyword) remain aliases for `burn run ...`.
 
 Each `--goal` launch runs `--jobs` sessions to completion and stops — you start each launch.
 Pick a `--target` above your current usage, or the launch refuses by design.
 
-## Flags
+## `burn run` flags
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -48,6 +53,18 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | `--i-know-this-bills-api` | `false` | Override the billing-risk env refusal |
 | `--dry-run` | `false` | Print state, spawn nothing |
 
+## `burn overview`
+
+Summarizes the JSONL activity store (`--store`, same default as `run`) grouped by goal: session
+count, total cost, turns, errors, time spent, and first/last run timestamps. Add `--json` for
+scripting.
+
+## `burn connect`
+
+Verifies and queries an external data source. Today: `burn connect jira --jql "<JQL>"`, which
+shells out to [`acli`](https://developer.atlassian.com/cloud/acli/) (install it and run `acli
+jira auth login` first) and prints matching issues as `KEY<tab>summary` lines.
+
 ## Safety
 
 `burn` only spends **subscription** quota, never pay-per-token API. It refuses to run when a
@@ -61,7 +78,7 @@ them from every session, and runs a one-time preflight that proves a probe actua
 Spend idle quota drafting review comments in **pending** state (nothing submitted):
 
 ```sh
-burn --jobs 1 --target 90 --dangerously-skip-permissions --goal '
+burn run --jobs 1 --target 90 --dangerously-skip-permissions --goal '
 Review PR https://github.com/OWNER/REPO/pull/123 (`gh pr diff 123`). Draft line-anchored
 comments and create them as a PENDING review via `gh api .../pulls/123/reviews` with no
 event — do NOT submit.'
