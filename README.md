@@ -27,7 +27,7 @@ burn run --dry-run --goal test                # print current 5h usage + planned
 burn run --goal "write tests for pkg/foo" --jobs 4 --target 80   # spend quota up to 80%
 burn run --watch --target 80                   # monitor only: notify when 5h usage hits 80%
 burn overview                                  # summarize past sessions: cost, turns, errors, time spent
-burn connect jira --jql 'project = SUDS AND status = "To Refine"'   # list matching Jira issues
+burn connect jira --jql 'project = DEMO AND status = "To Refine"'   # list matching Jira issues
 ```
 
 `burn <command>` dispatches to a subcommand (`run`, `overview`, `connect`, `setup`); bare

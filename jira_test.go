@@ -6,15 +6,15 @@ func TestParseAcliSearchOutput(t *testing.T) {
 	data := []byte(`[
   {
     "id": "48004",
-    "key": "SUDS-1496",
+    "key": "DEMO-101",
     "fields": {
-      "summary": "Exclude Aikido scanner traffic from GuardDuty findings via Trusted IP set",
+      "summary": "Add a health check endpoint to the billing service",
       "status": {"name": "In Progress"}
     }
   },
   {
     "id": "48005",
-    "key": "SUDS-1497",
+    "key": "DEMO-102",
     "fields": {
       "summary": "Rotate the shared CI deploy token"
     }
@@ -28,10 +28,10 @@ func TestParseAcliSearchOutput(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(items))
 	}
-	if items[0].Key != "SUDS-1496" || items[0].Summary != "Exclude Aikido scanner traffic from GuardDuty findings via Trusted IP set" {
+	if items[0].Key != "DEMO-101" || items[0].Summary != "Add a health check endpoint to the billing service" {
 		t.Fatalf("unexpected first item: %+v", items[0])
 	}
-	if items[1].Key != "SUDS-1497" || items[1].Summary != "Rotate the shared CI deploy token" {
+	if items[1].Key != "DEMO-102" || items[1].Summary != "Rotate the shared CI deploy token" {
 		t.Fatalf("unexpected second item: %+v", items[1])
 	}
 }

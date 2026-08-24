@@ -891,15 +891,15 @@ func TestParseAcliSearchOutput(t *testing.T) {
 	data := []byte(`[
   {
     "id": "48004",
-    "key": "SUDS-1496",
+    "key": "DEMO-101",
     "fields": {
-      "summary": "Exclude Aikido scanner traffic from GuardDuty findings via Trusted IP set",
+      "summary": "Add a health check endpoint to the billing service",
       "status": {"name": "In Progress"}
     }
   },
   {
     "id": "48005",
-    "key": "SUDS-1497",
+    "key": "DEMO-102",
     "fields": {
       "summary": "Rotate the shared CI deploy token"
     }
@@ -913,10 +913,10 @@ func TestParseAcliSearchOutput(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("expected 2 items, got %d", len(items))
 	}
-	if items[0].Key != "SUDS-1496" || items[0].Summary != "Exclude Aikido scanner traffic from GuardDuty findings via Trusted IP set" {
+	if items[0].Key != "DEMO-101" || items[0].Summary != "Add a health check endpoint to the billing service" {
 		t.Fatalf("unexpected first item: %+v", items[0])
 	}
-	if items[1].Key != "SUDS-1497" || items[1].Summary != "Rotate the shared CI deploy token" {
+	if items[1].Key != "DEMO-102" || items[1].Summary != "Rotate the shared CI deploy token" {
 		t.Fatalf("unexpected second item: %+v", items[1])
 	}
 }
@@ -1111,9 +1111,9 @@ Requires `acli` installed and authenticated (`acli jira auth status`). Run:
 go build -o burn .
 ./burn connect bogus --jql "x"                       # expect: unknown source "bogus" ...
 ./burn connect jira                                   # expect: --jql is required
-./burn connect jira --jql "project = SUDS AND summary ~ \"deploy\""
+./burn connect jira --jql "project = DEMO AND summary ~ \"deploy\""
 ```
-Expected: the first two calls error as described; the third lists matching `SUDS-*` issues as `KEY<tab>summary` lines (or `no matching issues` if none match).
+Expected: the first two calls error as described; the third lists matching `DEMO-*` issues as `KEY<tab>summary` lines (or `no matching issues` if none match).
 
 - [ ] **Step 9: Commit**
 
@@ -1160,7 +1160,7 @@ burn run --dry-run --goal test                # print current 5h usage + planned
 burn run --goal "write tests for pkg/foo" --jobs 4 --target 80   # spend quota up to 80%
 burn run --watch --target 80                   # monitor only: notify when 5h usage hits 80%
 burn overview                                  # summarize past sessions: cost, turns, errors, time spent
-burn connect jira --jql 'project = SUDS AND status = "To Refine"'   # list matching Jira issues
+burn connect jira --jql 'project = DEMO AND status = "To Refine"'   # list matching Jira issues
 ```
 
 `burn <command>` dispatches to a subcommand (`run`, `overview`, `connect`, `setup`); bare
