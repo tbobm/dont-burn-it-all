@@ -11,12 +11,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-// Config holds all run options.
+// Config holds all `run` subcommand options.
 type Config struct {
 	Target          float64
 	Jobs            int
@@ -32,33 +33,96 @@ type Config struct {
 	SkipPermissions bool
 }
 
+// commandHelp describes each top-level subcommand for printUsage. Later tasks
+// add entries here as they add subcommands.
+var commandHelp = map[string]string{
+	"run":   "launch or watch sessions against the subscription 5-hour quota",
+	"setup": "check burn's configuration (claude, token, endpoint, dirs)",
+}
+
 func main() {
-	if err := run(); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "burn: "+err.Error())
 		os.Exit(1)
 	}
 }
 
-func run() error {
-	if len(os.Args) > 1 && os.Args[1] == "setup" {
-		return setup()
+// resolveCommand maps raw CLI args to a command name and the remaining args
+// meant for that command's own flag set. Pure and side-effect free so it's
+// unit-testable without exec'ing anything.
+//
+// A first argument that starts with "-" is treated as a `run` flag (back-compat
+// for bare `burn --goal ...`), so it must NOT be confused with an unrecognized
+// subcommand name.
+func resolveCommand(args []string) (name string, rest []string) {
+	if len(args) == 0 {
+		return "run", args
 	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		return "help", nil
+	case "run", "setup":
+		return args[0], args[1:]
+	default:
+		if strings.HasPrefix(args[0], "-") {
+			return "run", args
+		}
+		return "unknown", args
+	}
+}
 
+func dispatch(args []string) error {
+	name, rest := resolveCommand(args)
+	switch name {
+	case "help":
+		printUsage()
+		return nil
+	case "run":
+		return cmdRun(rest)
+	case "setup":
+		return setup()
+	default:
+		printUsage()
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+// printUsage lists top-level subcommands, sorted for stable output.
+func printUsage() {
+	fmt.Println("burn <command> [flags]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	names := make([]string, 0, len(commandHelp))
+	for n := range commandHelp {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Printf("  %-10s %s\n", n, commandHelp[n])
+	}
+}
+
+// cmdRun implements the original `burn --goal ... [flags]` behavior — launch
+// or watch sessions — as the `run` subcommand.
+func cmdRun(args []string) error {
 	home, _ := os.UserHomeDir()
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfg := Config{}
-	flag.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
-	flag.IntVar(&cfg.Jobs, "jobs", 1, "number of parallel sessions to launch")
-	flag.StringVar(&cfg.Model, "model", "opus", "model for launched sessions (opus|sonnet|haiku|id)")
-	flag.StringVar(&cfg.Goal, "goal", "", "the task each session works on (required for launch)")
-	flag.BoolVar(&cfg.Watch, "watch", false, "governor mode: poll usage and notify at target, spawn nothing")
-	flag.StringVar(&cfg.Workdir, "workdir", filepath.Join(os.TempDir(), "dont-burn-it-all-scratch"), "working dir for sessions (a scratch dir, NOT a real repo)")
-	flag.StringVar(&cfg.Store, "store", filepath.Join(home, ".claude", "burn", "worker.jsonl"), "JSONL log path")
-	flag.IntVar(&cfg.MaxTurns, "max-turns", 30, "max agent turns per session")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "print usage, auth, and planned jobs; spawn nothing")
-	flag.Float64Var(&cfg.MaxUSDGuard, "max-usd-guard", 0, "abort if reported session cost exceeds this ($); 0 disables")
-	flag.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
-	flag.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
-	flag.Parse()
+	fs.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
+	fs.IntVar(&cfg.Jobs, "jobs", 1, "number of parallel sessions to launch")
+	fs.StringVar(&cfg.Model, "model", "opus", "model for launched sessions (opus|sonnet|haiku|id)")
+	fs.StringVar(&cfg.Goal, "goal", "", "the task each session works on (required for launch)")
+	fs.BoolVar(&cfg.Watch, "watch", false, "governor mode: poll usage and notify at target, spawn nothing")
+	fs.StringVar(&cfg.Workdir, "workdir", filepath.Join(os.TempDir(), "dont-burn-it-all-scratch"), "working dir for sessions (a scratch dir, NOT a real repo)")
+	fs.StringVar(&cfg.Store, "store", filepath.Join(home, ".claude", "burn", "worker.jsonl"), "JSONL log path")
+	fs.IntVar(&cfg.MaxTurns, "max-turns", 30, "max agent turns per session")
+	fs.BoolVar(&cfg.DryRun, "dry-run", false, "print usage, auth, and planned jobs; spawn nothing")
+	fs.Float64Var(&cfg.MaxUSDGuard, "max-usd-guard", 0, "abort if reported session cost exceeds this ($); 0 disables")
+	fs.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
+	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 
 	uc, err := newUsageClient()
 	if err != nil {
