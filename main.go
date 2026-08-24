@@ -36,8 +36,9 @@ type Config struct {
 // commandHelp describes each top-level subcommand for printUsage. Later tasks
 // add entries here as they add subcommands.
 var commandHelp = map[string]string{
-	"run":   "launch or watch sessions against the subscription 5-hour quota",
-	"setup": "check burn's configuration (claude, token, endpoint, dirs)",
+	"run":      "launch or watch sessions against the subscription 5-hour quota",
+	"overview": "summarize past burn activity from the JSONL store",
+	"setup":    "check burn's configuration (claude, token, endpoint, dirs)",
 }
 
 func main() {
@@ -61,7 +62,7 @@ func resolveCommand(args []string) (name string, rest []string) {
 	switch args[0] {
 	case "-h", "--help", "help":
 		return "help", nil
-	case "run", "setup":
+	case "run", "setup", "overview":
 		return args[0], args[1:]
 	default:
 		if strings.HasPrefix(args[0], "-") {
@@ -81,6 +82,8 @@ func dispatch(args []string) error {
 		return cmdRun(rest)
 	case "setup":
 		return setup()
+	case "overview":
+		return cmdOverview(rest)
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])

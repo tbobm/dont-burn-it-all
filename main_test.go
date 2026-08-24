@@ -16,6 +16,8 @@ func TestResolveCommand(t *testing.T) {
 		{"bare flags", []string{"--goal", "x"}, "run", []string{"--goal", "x"}},
 		{"explicit run", []string{"run", "--goal", "x"}, "run", []string{"--goal", "x"}},
 		{"setup", []string{"setup"}, "setup", []string{}},
+		{"overview bare", []string{"overview"}, "overview", []string{}},
+		{"overview with flags", []string{"overview", "--json"}, "overview", []string{"--json"}},
 		{"short help", []string{"-h"}, "help", nil},
 		{"long help", []string{"--help"}, "help", nil},
 		{"help word", []string{"help"}, "help", nil},

@@ -158,6 +158,7 @@ func launch(cfg Config, uc *UsageClient, token string, store *Store) (launchResu
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			start := time.Now().UTC()
 			// Nonce only defeats identical-prompt server caching; the work is real.
 			prompt := fmt.Sprintf("%s (nonce=%d)", cfg.Goal, i)
 			res, runErr := runClaude(cfg, token, prompt)
@@ -174,6 +175,7 @@ func launch(cfg Config, uc *UsageClient, token string, store *Store) (launchResu
 				TS:             time.Now().UTC().Format(time.RFC3339),
 				SessionID:      res.SessionID,
 				Goal:           cfg.Goal,
+				StartedAt:      start.Format(time.RFC3339),
 				Model:          cfg.Model,
 				CostUSD:        res.TotalCostUSD,
 				NumTurns:       res.NumTurns,
