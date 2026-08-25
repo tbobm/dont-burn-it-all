@@ -58,7 +58,12 @@ func childEnv(token string) []string {
 	return append(env, "CLAUDE_CODE_OAUTH_TOKEN="+token)
 }
 
-// runClaude spawns one headless `claude -p` and parses its JSON result.
+// runClaude spawns one headless `claude -p` and parses its JSON result. When
+// cfg.Sandbox is set (an opt-in extra, see sandbox.go), it runs inside a fresh
+// local OpenSandbox instead of directly on the host — same args, same JSON
+// parse, different exec target. This means preflight's probe session (below)
+// is sandboxed too, so it proves the *sandboxed* claude bills to the
+// subscription, not just the host one.
 func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	args := []string{
 		"-p", prompt,
@@ -69,9 +74,24 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	if cfg.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	cmd := exec.Command("claude", args...)
-	cmd.Env = childEnv(token)
-	cmd.Dir = cfg.Workdir
+
+	var cmd *exec.Cmd
+	if cfg.Sandbox {
+		id, cleanup, err := ensureSandbox(cfg, token, resolveGHToken(cfg))
+		if err != nil {
+			return claudeResult{}, err
+		}
+		defer cleanup()
+		osbArgs := append([]string{"command", "run", id, "-o", "raw", "--", "claude"}, args...)
+		cmd = exec.Command("osb", osbArgs...)
+		// osb's own env — the `-e VARNAME` flags in ensureSandbox already told
+		// it which values to forward into the container by name, not value.
+		cmd.Env = childEnv(token)
+	} else {
+		cmd = exec.Command("claude", args...)
+		cmd.Env = childEnv(token)
+		cmd.Dir = cfg.Workdir
+	}
 
 	out, err := cmd.Output()
 	var res claudeResult

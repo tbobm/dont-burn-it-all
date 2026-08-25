@@ -30,6 +30,13 @@ type Config struct {
 	MaxUSDGuard     float64
 	AllowBillsAPI   bool
 	SkipPermissions bool
+
+	// Sandbox is an opt-in extra (like a Python package extra): none of this is
+	// checked or required unless the flag is set. See sandbox.go.
+	Sandbox      bool
+	SandboxImage string
+	Repo         string
+	GHTokenEnv   string
 }
 
 func main() {
@@ -58,6 +65,10 @@ func run() error {
 	flag.Float64Var(&cfg.MaxUSDGuard, "max-usd-guard", 0, "abort if reported session cost exceeds this ($); 0 disables")
 	flag.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
 	flag.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
+	flag.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
+	flag.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
+	flag.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
+	flag.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
 	flag.Parse()
 
 	uc, err := newUsageClient()
@@ -102,6 +113,11 @@ func dryRun(cfg Config, uc *UsageClient) error {
 func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 	if strings.TrimSpace(cfg.Goal) == "" {
 		return fmt.Errorf("--goal is required for a launch (or use --watch)")
+	}
+	if cfg.Sandbox {
+		if err := validateSandboxConfig(&cfg); err != nil {
+			return err
+		}
 	}
 	u, err := uc.Get()
 	if err != nil {

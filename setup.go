@@ -72,10 +72,46 @@ func setup() error {
 		ok("store dir writable: " + storeDir)
 	}
 
+	// 6. --sandbox is an opt-in extra: never hardFail here. It's only a hard
+	// requirement at launch time, and only if --sandbox was actually passed.
+	checkSandboxExtra(ok, warn)
+
 	fmt.Println()
 	if hardFail {
 		return fmt.Errorf("setup incomplete — resolve the [FAIL] items above")
 	}
 	fmt.Println("setup OK — try: burn --dry-run --goal x")
 	return nil
+}
+
+// checkSandboxExtra reports --sandbox prerequisites as informational only
+// (never hardFail) — burn works fully without any of this.
+func checkSandboxExtra(ok, warn func(string)) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		warn("sandbox extra: docker not found — optional, only needed for --sandbox")
+		return
+	}
+	if err := exec.Command("docker", "info").Run(); err != nil {
+		warn("sandbox extra: docker daemon not reachable — optional, only needed for --sandbox")
+		return
+	}
+	ok("sandbox extra: docker found and reachable")
+
+	if _, err := exec.LookPath("osb"); err != nil {
+		warn("sandbox extra: `osb` (OpenSandbox CLI) not found — install it before using --sandbox")
+	} else {
+		ok("sandbox extra: `osb` found on PATH")
+	}
+
+	if err := exec.Command("docker", "image", "inspect", "burn-sandbox:latest").Run(); err != nil {
+		warn("sandbox extra: image burn-sandbox:latest not built — see Dockerfile.sandbox")
+	} else {
+		ok("sandbox extra: burn-sandbox:latest image present")
+	}
+
+	if _, err := exec.LookPath("gh"); err != nil {
+		warn("sandbox extra: `gh` not found — only needed if a --sandbox goal opens a PR")
+	} else {
+		ok("sandbox extra: `gh` found on PATH")
+	}
 }
