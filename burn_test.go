@@ -149,6 +149,65 @@ func TestPreflightStampIsolatedByMode(t *testing.T) {
 	}
 }
 
+// The --volumes-file schema is not documented in `osb --help` or the upstream
+// README — this locks in the shape confirmed against a live local
+// opensandbox-server v0.1.1 (`[{"name","mountPath","host":{"path"}}]`), so a
+// future osb upgrade that silently changes it fails a test instead of failing
+// a real --sandbox launch.
+func TestWriteVolumesFileSchema(t *testing.T) {
+	path, err := writeVolumesFile("/tmp/some-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vols []sandboxVolume
+	if err := json.Unmarshal(data, &vols); err != nil {
+		t.Fatalf("volumes file is not valid JSON for the expected schema: %v", err)
+	}
+	if len(vols) != 1 {
+		t.Fatalf("expected exactly one volume, got %d", len(vols))
+	}
+	if vols[0].MountPath != sandboxMountPath {
+		t.Fatalf("expected mountPath %q, got %q", sandboxMountPath, vols[0].MountPath)
+	}
+	if vols[0].Host.Path != "/tmp/some-repo" {
+		t.Fatalf("expected host.path %q, got %q", "/tmp/some-repo", vols[0].Host.Path)
+	}
+}
+
+// The entrypoint script is the mechanism that keeps secret values out of any
+// host-visible argv (osb's `sandbox create -e KEY=VALUE` puts the value
+// directly in this process's own argv, confirmed live against a real osb
+// server — this script sidesteps that by only ever referencing file paths).
+// It must never contain a literal secret, only paths and the configured env
+// var name.
+func TestSandboxEntrypointScriptNoSecretsEmbedded(t *testing.T) {
+	cfg := Config{GHTokenEnv: "GH_TOKEN"}
+	script := sandboxEntrypointScript(cfg, true)
+	if !strings.Contains(script, sandboxOAuthTokenFile) {
+		t.Fatal("expected script to reference the oauth token file path")
+	}
+	if !strings.Contains(script, "export GH_TOKEN=") || !strings.Contains(script, sandboxGHTokenFile) {
+		t.Fatal("expected script to export GH_TOKEN from the gh token file path")
+	}
+	if !strings.HasSuffix(strings.TrimSpace(script), `exec claude "$@"`) {
+		t.Fatalf("expected script to hand off to claude with args untouched, got %q", script)
+	}
+}
+
+func TestSandboxEntrypointScriptOmitsGHExportWhenNoToken(t *testing.T) {
+	cfg := Config{GHTokenEnv: "GH_TOKEN"}
+	script := sandboxEntrypointScript(cfg, false)
+	if strings.Contains(script, "GH_TOKEN") {
+		t.Fatalf("expected no GH_TOKEN export when hasGHToken is false, got %q", script)
+	}
+}
+
 func TestCredsBlobParse(t *testing.T) {
 	raw := `{"claudeAiOauth":{"accessToken":"sk-ant-oat01-abc","refreshToken":"x","expiresAt":1}}`
 	var b credsBlob

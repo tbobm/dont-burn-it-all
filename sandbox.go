@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -23,11 +24,29 @@ import (
 // (runner.go:preflight) is sandboxed automatically, proving the *sandboxed*
 // claude bills to the subscription, not just the host one — as long as the
 // preflight stamp is mode-keyed (it is, see stampPath in main.go).
+//
+// The osb CLI details below (--volumes-file schema, env persisting across
+// `command run` calls, `sandbox create` requiring -o json for a parseable id)
+// are verified against a live local `osb`/opensandbox-server v0.1.1, not
+// assumed from docs — the CLI's actual flags differ from its own --help text
+// and from the upstream README in more than one place.
+
+// sandboxMountPath is where cfg.Repo is bind-mounted inside the sandbox.
+const sandboxMountPath = "/workspace"
+
+// Paths written inside the sandbox by ensureSandbox — never referenced by
+// value anywhere on the host, only by path.
+const (
+	sandboxOAuthTokenFile = "/tmp/.burn-oauth-token"
+	sandboxGHTokenFile    = "/tmp/.burn-gh-token"
+	sandboxEntrypointFile = "/tmp/.burn-entrypoint.sh"
+)
 
 // sandboxCommandTimeout bounds a single sandboxed `claude` invocation
-// (including the preflight probe). Without this, a hung osb/claude process
-// blocks cmd.Output() forever, runClaude never returns, and the deferred
-// cleanup that would kill the sandbox never runs.
+// (including the preflight probe), enforced both client-side (context on the
+// `osb` exec) and server-side (`command run -t`). Without this, a hung
+// osb/claude process blocks cmd.Output() forever, runClaude never returns, and
+// the deferred cleanup that would kill the sandbox never runs.
 // ponytail: fixed value; make it a flag if sessions legitimately need longer.
 const sandboxCommandTimeout = 60 * time.Minute
 
@@ -51,8 +70,8 @@ func killAllSandboxes() {
 
 // validateSandboxConfig fills in defaults, resolves the repo to an absolute
 // path (a relative --repo would validate fine via os.Stat here but break the
-// --mount source osb receives, since that isn't resolved against burn's cwd),
-// and checks the repo is real. Only called when cfg.Sandbox is set.
+// bind-mount source osb receives, since that isn't resolved against burn's
+// cwd), and checks the repo is real. Only called when cfg.Sandbox is set.
 func validateSandboxConfig(cfg *Config) error {
 	if cfg.Repo == "" {
 		cfg.Repo = cfg.Workdir
@@ -90,56 +109,129 @@ func resolveGHToken(cfg Config) string {
 	return strings.TrimSpace(string(out))
 }
 
-// sandboxEnvFlags returns the `-e VARNAME` (name-only) flags that tell osb
-// which vars to forward into the sandbox by name, not value. Used at both
-// `sandbox create` and `command run` — osb's exact semantics for whether
-// create-time forwarding persists across later execs aren't verified against
-// this codebase, so both call sites request it explicitly rather than assume.
-func sandboxEnvFlags(cfg Config, ghToken string) []string {
-	flags := []string{"-e", "CLAUDE_CODE_OAUTH_TOKEN"}
-	if ghToken != "" {
-		flags = append(flags, "-e", cfg.GHTokenEnv)
-	}
-	return flags
+// writeSandboxSecret writes content to path inside the sandbox via `osb file
+// write`'s stdin form (the --content flag omitted) — confirmed live that this
+// never puts the value in this host process's argv, unlike `sandbox create -e
+// KEY=VALUE`, which does (osb has no --env-file or other non-argv form of -e).
+func writeSandboxSecret(id, path, content string) error {
+	cmd := exec.Command("osb", "file", "write", id, path, "--mode", "0600")
+	cmd.Stdin = strings.NewReader(content)
+	return cmd.Run()
 }
 
-// sandboxProcessEnv builds the env for the `osb` process itself. The values
-// behind sandboxEnvFlags' name-only flags travel this way — via osb's own
-// process env, same discipline as the host path's childEnv — never through
-// argv, so the token is never `ps`-visible.
-func sandboxProcessEnv(token, ghToken string, cfg Config) []string {
-	env := childEnv(token)
-	if ghToken != "" {
-		env = append(env, cfg.GHTokenEnv+"="+ghToken)
+// sandboxEntrypointScript builds the wrapper `command run` execs instead of
+// `claude` directly: it exports the OAuth/GH tokens from the files
+// writeSandboxSecret wrote, then hands off to claude with argv untouched. The
+// script text itself has no secret values in it — only file paths and the
+// (non-secret) configured GH env var name — so writing it is safe by any
+// transport, argv included.
+func sandboxEntrypointScript(cfg Config, hasGHToken bool) string {
+	script := "#!/bin/sh\nset -e\n" +
+		fmt.Sprintf("export CLAUDE_CODE_OAUTH_TOKEN=\"$(cat %s)\"\n", sandboxOAuthTokenFile)
+	if hasGHToken {
+		script += fmt.Sprintf("export %s=\"$(cat %s)\"\n", cfg.GHTokenEnv, sandboxGHTokenFile)
 	}
-	return env
+	script += "exec claude \"$@\"\n"
+	return script
+}
+
+// sandboxVolume is one entry of osb's --volumes-file JSON. osb has no --mount
+// flag (unlike docker) — a bind mount is only expressible this way. Schema
+// confirmed against a live server; osb's own --help does not document it.
+type sandboxVolume struct {
+	Name      string            `json:"name"`
+	MountPath string            `json:"mountPath"`
+	Host      sandboxHostVolume `json:"host"`
+}
+
+type sandboxHostVolume struct {
+	Path string `json:"path"`
+}
+
+// writeVolumesFile writes a one-entry --volumes-file describing cfg.Repo
+// bind-mounted read-write at sandboxMountPath. The caller must remove the
+// returned path once `osb sandbox create` has read it.
+func writeVolumesFile(repo string) (string, error) {
+	data, err := json.Marshal([]sandboxVolume{{
+		Name:      "repo",
+		MountPath: sandboxMountPath,
+		Host:      sandboxHostVolume{Path: repo},
+	}})
+	if err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp("", "burn-sandbox-volumes-*.json")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := f.Write(data); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+// sandboxCreateResult is the subset of `osb sandbox create -o json` we need.
+type sandboxCreateResult struct {
+	ID string `json:"id"`
 }
 
 // ensureSandbox creates one local OpenSandbox for a single session: the
-// configured image, the repo bind-mounted read-write at /workspace, and the
-// allowlisted vars forwarded by name only. Registers the id in
-// activeSandboxes so an interrupted process can still kill it.
+// configured image and the repo bind-mounted read-write at sandboxMountPath.
+// No secret ever appears in an `osb sandbox create`/`command run` argument —
+// tokens are written into the sandbox filesystem via stdin (writeSandboxSecret)
+// and picked up by an entrypoint wrapper script (sandboxEntrypointScript),
+// which runner.go execs instead of calling `claude` directly. Registers the id
+// in activeSandboxes so an interrupted process can still kill it.
 func ensureSandbox(cfg Config, token, ghToken string) (id string, cleanup func(), err error) {
-	args := append([]string{
+	volFile, err := writeVolumesFile(cfg.Repo)
+	if err != nil {
+		return "", nil, fmt.Errorf("sandbox volumes file: %w", err)
+	}
+	defer os.Remove(volFile)
+
+	args := []string{
 		"sandbox", "create",
 		"--image", cfg.SandboxImage,
-		"--mount", fmt.Sprintf("%s:/workspace", cfg.Repo),
-	}, sandboxEnvFlags(cfg, ghToken)...)
-
+		"--volumes-file", volFile,
+		"-o", "json", // default output is a human-readable table, not a bare id
+	}
 	cmd := exec.Command("osb", args...)
-	cmd.Env = sandboxProcessEnv(token, ghToken, cfg)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", nil, fmt.Errorf("osb sandbox create: %w", err)
 	}
-	id = strings.TrimSpace(string(out))
-	if id == "" {
+	var res sandboxCreateResult
+	if jErr := json.Unmarshal(out, &res); jErr != nil {
+		return "", nil, fmt.Errorf("osb sandbox create: parsing output: %w", jErr)
+	}
+	if res.ID == "" {
 		return "", nil, fmt.Errorf("osb sandbox create: empty sandbox id")
 	}
+	id = res.ID
 	activeSandboxes.Store(id, struct{}{})
 	cleanup = func() {
 		_ = exec.Command("osb", "sandbox", "kill", id).Run()
 		activeSandboxes.Delete(id)
 	}
+
+	if err := writeSandboxSecret(id, sandboxOAuthTokenFile, token); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("writing sandbox oauth token: %w", err)
+	}
+	if ghToken != "" {
+		if err := writeSandboxSecret(id, sandboxGHTokenFile, ghToken); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("writing sandbox gh token: %w", err)
+		}
+	}
+	entrypoint := exec.Command("osb", "file", "write", id, sandboxEntrypointFile, "--mode", "0700")
+	entrypoint.Stdin = strings.NewReader(sandboxEntrypointScript(cfg, ghToken != ""))
+	if err := entrypoint.Run(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("writing sandbox entrypoint: %w", err)
+	}
+
 	return id, cleanup, nil
 }

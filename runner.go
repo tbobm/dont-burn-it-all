@@ -81,22 +81,28 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	var cmd *exec.Cmd
 	var cancel context.CancelFunc
 	if cfg.Sandbox {
-		ghToken := resolveGHToken(cfg)
-		id, cleanup, err := ensureSandbox(cfg, token, ghToken)
+		id, cleanup, err := ensureSandbox(cfg, token, resolveGHToken(cfg))
 		if err != nil {
 			return claudeResult{}, err
 		}
 		defer cleanup()
-		// -e flags forwarded again here (not just at `sandbox create`): osb's
-		// exact env-forwarding semantics across separate `command run` execs
-		// aren't verified, so we don't rely on create-time forwarding persisting.
-		osbArgs := append([]string{"command", "run", id, "-o", "raw"}, sandboxEnvFlags(cfg, ghToken)...)
-		osbArgs = append(osbArgs, "--", "claude")
+		// Exec the entrypoint wrapper ensureSandbox wrote, not `claude`
+		// directly — it exports the OAuth/GH tokens from files inside the
+		// sandbox (never from argv) before handing off to claude with args
+		// untouched. -t is a second, server-side enforcement of
+		// sandboxCommandTimeout, on top of the client-side context below —
+		// belt and suspenders against either the osb CLI or claude hanging.
+		osbArgs := []string{
+			"command", "run", id,
+			"-o", "raw",
+			"-w", sandboxMountPath,
+			"-t", fmt.Sprintf("%dm", int(sandboxCommandTimeout.Minutes())),
+			"--", "sh", sandboxEntrypointFile,
+		}
 		osbArgs = append(osbArgs, args...)
 		var ctx context.Context
 		ctx, cancel = context.WithTimeout(context.Background(), sandboxCommandTimeout)
 		cmd = exec.CommandContext(ctx, "osb", osbArgs...)
-		cmd.Env = sandboxProcessEnv(token, ghToken, cfg)
 	} else {
 		cmd = exec.Command("claude", args...)
 		cmd.Env = childEnv(token)

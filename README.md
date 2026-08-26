@@ -76,6 +76,9 @@ Fix the failing test in pkg/foo, commit on a new branch, push, and open a draft 
 `--sandbox` currently supports `--jobs 1` only — mounting one repo read-write into multiple
 sandboxes would race on the working tree and git index.
 
+Changes to `--sandbox` need more than unit tests to trust — see [TESTING.md](TESTING.md) for
+the required smoke test against a real local OpenSandbox server.
+
 ## Example: prepare pending PR reviews
 
 Spend idle quota drafting review comments in **pending** state (nothing submitted):
