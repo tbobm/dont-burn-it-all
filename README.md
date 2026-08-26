@@ -47,6 +47,10 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | `--dangerously-skip-permissions` | `false` | Run sessions unattended (opt-in) |
 | `--i-know-this-bills-api` | `false` | Override the billing-risk env refusal |
 | `--dry-run` | `false` | Print state, spawn nothing |
+| `--sandbox` | `false` | Opt-in extra: run sessions in a local [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) (Docker) instead of on the host |
+| `--sandbox-image` | `burn-sandbox:latest` | Image for `--sandbox` sessions |
+| `--repo` | — | Repo mounted read-write into the sandbox (`--sandbox` only; defaults to `--workdir`) |
+| `--gh-token-env` | `GH_TOKEN` | Env var with a GitHub token to forward for PR creation (falls back to `gh auth token`) |
 
 ## Safety
 
@@ -55,6 +59,25 @@ billing-risk env var (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, Bedrock/Verte
 them from every session, and runs a one-time preflight that proves a probe actually moves your
 5-hour usage before launching real work. Sessions are interactive unless you pass
 `--dangerously-skip-permissions` — only do that with a throwaway `--workdir`.
+
+## Sandboxed write sessions (`--sandbox`)
+
+An opt-in extra — nothing in the base tool depends on it, and `burn setup` reports it as
+informational only (never a hard failure). Requires Docker and the
+[`osb` CLI](https://github.com/opensandbox-group/OpenSandbox); build the image with
+`just build-sandbox-image`. Use it when a goal needs `--dangerously-skip-permissions` *and*
+real write access (e.g. opening a PR), so the unattended session is isolated from your host:
+
+```sh
+burn --sandbox --repo ~/code/myrepo --dangerously-skip-permissions --goal '
+Fix the failing test in pkg/foo, commit on a new branch, push, and open a draft PR with `gh pr create`.'
+```
+
+`--sandbox` currently supports `--jobs 1` only — mounting one repo read-write into multiple
+sandboxes would race on the working tree and git index.
+
+Changes to `--sandbox` need more than unit tests to trust — see [TESTING.md](TESTING.md) for
+the required smoke test against a real local OpenSandbox server.
 
 ## Example: prepare pending PR reviews
 

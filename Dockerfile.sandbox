@@ -1,0 +1,31 @@
+# Image for `burn --sandbox`. Optional extra — only needed if you use --sandbox;
+# see Dockerfile.sandbox usage in setup.go's checkSandboxExtra.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl ca-certificates jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# Node.js (required by Claude Code).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Claude Code CLI.
+ARG TARGETARCH=arm64
+RUN npm install -g --include=optional @anthropic-ai/claude-code \
+    && npm install -g --include=optional "@anthropic-ai/claude-code-linux-${TARGETARCH}"
+
+# GitHub CLI — needed only if a --sandbox goal opens a PR (`gh pr create`).
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y gh \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user — Claude Code refuses --dangerously-skip-permissions as root.
+RUN useradd -m -u 1001 -s /bin/bash worker
+USER worker
+WORKDIR /workspace

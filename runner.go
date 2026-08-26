@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -58,7 +59,14 @@ func childEnv(token string) []string {
 	return append(env, "CLAUDE_CODE_OAUTH_TOKEN="+token)
 }
 
-// runClaude spawns one headless `claude -p` and parses its JSON result.
+// runClaude spawns one headless `claude -p` and parses its JSON result. When
+// cfg.Sandbox is set (an opt-in extra, see sandbox.go), it runs inside a fresh
+// local OpenSandbox instead of directly on the host — same args, same JSON
+// parse, different exec target. preflight() calls this same function for its
+// probe session with cfg carried through unchanged, so a sandboxed run's
+// preflight proof runs sandboxed too — as long as preflight's own freshness
+// stamp is keyed by mode (it is, see stampPath in main.go), so a host-mode
+// proof can never be mistaken for a sandboxed one.
 func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	args := []string{
 		"-p", prompt,
@@ -69,9 +77,46 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	if cfg.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
-	cmd := exec.Command("claude", args...)
-	cmd.Env = childEnv(token)
-	cmd.Dir = cfg.Workdir
+
+	var cmd *exec.Cmd
+	var cancel context.CancelFunc
+	if cfg.Sandbox {
+		id, cleanup, err := ensureSandbox(cfg, token, resolveGHToken(cfg))
+		if err != nil {
+			return claudeResult{}, err
+		}
+		defer cleanup()
+		// Exec the entrypoint wrapper ensureSandbox wrote, not `claude`
+		// directly — it exports the OAuth/GH tokens from files inside the
+		// sandbox (never from argv) before handing off to claude with args
+		// untouched. -t is a second, server-side enforcement of
+		// sandboxCommandTimeout, on top of the client-side context below —
+		// belt and suspenders against either the osb CLI or claude hanging.
+		osbArgs := []string{
+			"command", "run", id,
+			"-o", "raw",
+			"-w", sandboxMountPath,
+			"-t", fmt.Sprintf("%dm", int(sandboxCommandTimeout.Minutes())),
+			"--", "sh", sandboxEntrypointFile,
+		}
+		osbArgs = append(osbArgs, args...)
+		var ctx context.Context
+		ctx, cancel = context.WithTimeout(context.Background(), sandboxCommandTimeout)
+		cmd = exec.CommandContext(ctx, "osb", osbArgs...)
+		// Same scrub as the host branch below: the sandboxed claude only ever
+		// gets its token from the file ensureSandbox wrote (never from env),
+		// but `osb` itself still inherits this process's env unless told
+		// otherwise — strip billing-risk vars from it too, in case osb
+		// forwards its own env into the container.
+		cmd.Env = childEnv(token)
+	} else {
+		cmd = exec.Command("claude", args...)
+		cmd.Env = childEnv(token)
+		cmd.Dir = cfg.Workdir
+	}
+	if cancel != nil {
+		defer cancel()
+	}
 
 	out, err := cmd.Output()
 	var res claudeResult
@@ -95,7 +140,7 @@ func preflight(cfg Config, uc *UsageClient, token string) error {
 			"Unset them, or pass --i-know-this-bills-api to override", strings.Join(bad, ", "))
 	}
 
-	if isPreflightFresh() {
+	if isPreflightFresh(cfg.Sandbox) {
 		fmt.Println("preflight: recent metering proof found, skipping the 3-minute check")
 		return nil
 	}
@@ -125,7 +170,7 @@ func preflight(cfg Config, uc *UsageClient, token string) error {
 	}
 	fmt.Printf("preflight: OK — utilization moved %.1f%% -> %.1f%%, subscription metering confirmed\n",
 		before.FiveHour.Utilization, after.FiveHour.Utilization)
-	markPreflightFresh()
+	markPreflightFresh(cfg.Sandbox)
 	return nil
 }
 
