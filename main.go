@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -40,36 +42,66 @@ type Config struct {
 }
 
 func main() {
+	installSandboxSignalHandler()
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "burn: "+err.Error())
 		os.Exit(1)
 	}
 }
 
+// installSandboxSignalHandler ensures an interrupted --sandbox run doesn't
+// leave a container mounted read-write against the real repo. Go does not run
+// deferred functions (like runClaude's cleanup) on SIGINT/SIGTERM, so this
+// catches them explicitly and force-kills every sandbox this process created.
+// A no-op if --sandbox was never used — killAllSandboxes has nothing to do.
+func installSandboxSignalHandler() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		killAllSandboxes()
+		os.Exit(1)
+	}()
+}
+
 func run() error {
-	if len(os.Args) > 1 && os.Args[1] == "setup" {
-		return setup()
+	args := os.Args[1:]
+	isSetup := len(args) > 0 && args[0] == "setup"
+	if isSetup {
+		args = args[1:]
 	}
 
 	home, _ := os.UserHomeDir()
 	cfg := Config{}
-	flag.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
-	flag.IntVar(&cfg.Jobs, "jobs", 1, "number of parallel sessions to launch")
-	flag.StringVar(&cfg.Model, "model", "opus", "model for launched sessions (opus|sonnet|haiku|id)")
-	flag.StringVar(&cfg.Goal, "goal", "", "the task each session works on (required for launch)")
-	flag.BoolVar(&cfg.Watch, "watch", false, "governor mode: poll usage and notify at target, spawn nothing")
-	flag.StringVar(&cfg.Workdir, "workdir", filepath.Join(os.TempDir(), "dont-burn-it-all-scratch"), "working dir for sessions (a scratch dir, NOT a real repo)")
-	flag.StringVar(&cfg.Store, "store", filepath.Join(home, ".claude", "burn", "worker.jsonl"), "JSONL log path")
-	flag.IntVar(&cfg.MaxTurns, "max-turns", 30, "max agent turns per session")
-	flag.BoolVar(&cfg.DryRun, "dry-run", false, "print usage, auth, and planned jobs; spawn nothing")
-	flag.Float64Var(&cfg.MaxUSDGuard, "max-usd-guard", 0, "abort if reported session cost exceeds this ($); 0 disables")
-	flag.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
-	flag.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
-	flag.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
-	flag.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
-	flag.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
-	flag.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
-	flag.Parse()
+	fs := flag.NewFlagSet("burn", flag.ContinueOnError)
+	fs.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
+	fs.IntVar(&cfg.Jobs, "jobs", 1, "number of parallel sessions to launch")
+	fs.StringVar(&cfg.Model, "model", "opus", "model for launched sessions (opus|sonnet|haiku|id)")
+	fs.StringVar(&cfg.Goal, "goal", "", "the task each session works on (required for launch)")
+	fs.BoolVar(&cfg.Watch, "watch", false, "governor mode: poll usage and notify at target, spawn nothing")
+	fs.StringVar(&cfg.Workdir, "workdir", filepath.Join(os.TempDir(), "dont-burn-it-all-scratch"), "working dir for sessions (a scratch dir, NOT a real repo)")
+	fs.StringVar(&cfg.Store, "store", filepath.Join(home, ".claude", "burn", "worker.jsonl"), "JSONL log path")
+	fs.IntVar(&cfg.MaxTurns, "max-turns", 30, "max agent turns per session")
+	fs.BoolVar(&cfg.DryRun, "dry-run", false, "print usage, auth, and planned jobs; spawn nothing")
+	fs.Float64Var(&cfg.MaxUSDGuard, "max-usd-guard", 0, "abort if reported session cost exceeds this ($); 0 disables")
+	fs.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
+	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
+	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
+	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
+	fs.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
+	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
+	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return nil
+		}
+		return err
+	}
+
+	// setup is parsed like any other invocation (so `burn setup --sandbox-image
+	// foo` checks the right image) but dispatches before touching usage/store.
+	if isSetup {
+		return setup(cfg.SandboxImage)
+	}
 
 	uc, err := newUsageClient()
 	if err != nil {
@@ -92,6 +124,15 @@ func run() error {
 }
 
 func dryRun(cfg Config, uc *UsageClient) error {
+	// Run the same validation a real launch would hit (--jobs>1 refusal, repo
+	// resolution) so dry-run actually previews what doLaunch will do.
+	target := cfg.Workdir
+	if cfg.Sandbox {
+		if err := validateSandboxConfig(&cfg); err != nil {
+			return err
+		}
+		target = cfg.Repo + " (sandboxed, mounted read-write at /workspace)"
+	}
 	u, err := uc.Get()
 	if err != nil {
 		return err
@@ -105,7 +146,7 @@ func dryRun(cfg Config, uc *UsageClient) error {
 	fmt.Printf("5-hour usage      : %.1f%% (resets %s)\n", u.FiveHour.Utilization, u.FiveHour.ResetsAt)
 	fmt.Printf("7-day usage       : %.1f%%\n", u.SevenDay.Utilization)
 	fmt.Printf("target            : %.1f%%\n", cfg.Target)
-	fmt.Printf("planned           : %d session(s) of model %q in %s\n", cfg.Jobs, cfg.Model, cfg.Workdir)
+	fmt.Printf("planned           : %d session(s) of model %q in %s\n", cfg.Jobs, cfg.Model, target)
 	fmt.Printf("goal              : %q\n", cfg.Goal)
 	return nil
 }
@@ -191,13 +232,20 @@ func notify(msg string) {
 // --- preflight stamp: lets repeat manual launches skip the ~3m metering proof
 // within the same usage window. ---
 
-func stampPath() string {
+// stampPath is keyed by sandbox vs host so a metering proof from one mode
+// never skips the probe for the other — a host-mode stamp proves nothing about
+// whether the sandboxed claude bills to the subscription, and vice versa.
+func stampPath(sandbox bool) string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "burn", ".preflight-ok")
+	name := ".preflight-ok"
+	if sandbox {
+		name = ".preflight-ok-sandbox"
+	}
+	return filepath.Join(home, ".claude", "burn", name)
 }
 
-func isPreflightFresh() bool {
-	data, err := os.ReadFile(stampPath())
+func isPreflightFresh(sandbox bool) bool {
+	data, err := os.ReadFile(stampPath(sandbox))
 	if err != nil {
 		return false
 	}
@@ -208,8 +256,8 @@ func isPreflightFresh() bool {
 	return time.Since(time.Unix(ts, 0)) < 4*time.Hour
 }
 
-func markPreflightFresh() {
-	p := stampPath()
+func markPreflightFresh(sandbox bool) {
+	p := stampPath(sandbox)
 	os.MkdirAll(filepath.Dir(p), 0o755)
 	os.WriteFile(p, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644)
 }

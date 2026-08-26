@@ -10,7 +10,7 @@ import (
 // setup is a self-check, in the spirit of `dx setup`: it verifies everything
 // `burn` needs to run sessions that bill to the subscription, and prints a
 // checklist with remediation. Exits non-zero if a hard requirement is missing.
-func setup() error {
+func setup(sandboxImage string) error {
 	var hardFail bool
 	ok := func(msg string) { fmt.Println("[ ok ] " + msg) }
 	warn := func(msg string) { fmt.Println("[warn] " + msg) }
@@ -74,7 +74,7 @@ func setup() error {
 
 	// 6. --sandbox is an opt-in extra: never hardFail here. It's only a hard
 	// requirement at launch time, and only if --sandbox was actually passed.
-	checkSandboxExtra(ok, warn)
+	checkSandboxExtra(ok, warn, sandboxImage)
 
 	fmt.Println()
 	if hardFail {
@@ -85,8 +85,11 @@ func setup() error {
 }
 
 // checkSandboxExtra reports --sandbox prerequisites as informational only
-// (never hardFail) — burn works fully without any of this.
-func checkSandboxExtra(ok, warn func(string)) {
+// (never hardFail) — burn works fully without any of this. image is the
+// configured --sandbox-image (parsed the same as any other flag before
+// dispatching to setup — see run() in main.go), not a hardcoded literal, so
+// this checks whatever image a real launch would actually use.
+func checkSandboxExtra(ok, warn func(string), image string) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		warn("sandbox extra: docker not found — optional, only needed for --sandbox")
 		return
@@ -103,10 +106,10 @@ func checkSandboxExtra(ok, warn func(string)) {
 		ok("sandbox extra: `osb` found on PATH")
 	}
 
-	if err := exec.Command("docker", "image", "inspect", "burn-sandbox:latest").Run(); err != nil {
-		warn("sandbox extra: image burn-sandbox:latest not built — see Dockerfile.sandbox")
+	if err := exec.Command("docker", "image", "inspect", image).Run(); err != nil {
+		warn(fmt.Sprintf("sandbox extra: image %s not built — see Dockerfile.sandbox", image))
 	} else {
-		ok("sandbox extra: burn-sandbox:latest image present")
+		ok(fmt.Sprintf("sandbox extra: %s image present", image))
 	}
 
 	if _, err := exec.LookPath("gh"); err != nil {

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -86,6 +87,32 @@ func TestValidateSandboxConfigAcceptsWorktreeGitFile(t *testing.T) {
 	}
 }
 
+// A relative --repo must resolve to an absolute path — os.Stat happily
+// validates a relative path against the process cwd, but the same string
+// later becomes osb's --mount source, which isn't resolved against burn's cwd.
+func TestValidateSandboxConfigResolvesRelativeRepo(t *testing.T) {
+	parent := t.TempDir()
+	repo := parent + "/repo"
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(repo+"/.git", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(parent)
+
+	cfg := Config{Sandbox: true, Repo: "./repo", Jobs: 1}
+	if err := validateSandboxConfig(&cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !filepath.IsAbs(cfg.Repo) {
+		t.Fatalf("expected an absolute Repo path, got %q", cfg.Repo)
+	}
+	if cfg.Repo != repo {
+		t.Fatalf("expected Repo %q, got %q", repo, cfg.Repo)
+	}
+}
+
 func TestValidateSandboxConfigRejectsParallelJobs(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(dir+"/.git", 0o755); err != nil {
@@ -94,6 +121,31 @@ func TestValidateSandboxConfigRejectsParallelJobs(t *testing.T) {
 	cfg := Config{Sandbox: true, Repo: dir, Jobs: 2}
 	if err := validateSandboxConfig(&cfg); err == nil {
 		t.Fatal("expected error for --sandbox with --jobs 2, got nil")
+	}
+}
+
+// The preflight freshness stamp must be mode-keyed: a host-mode metering proof
+// must never be mistaken for a sandbox-mode one (and vice versa), or a
+// --sandbox run could skip its billing-metering probe entirely on the strength
+// of a proof that only ever exercised the host `claude` binary.
+func TestPreflightStampIsolatedByMode(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	if isPreflightFresh(false) || isPreflightFresh(true) {
+		t.Fatal("expected no stamp to exist yet")
+	}
+
+	markPreflightFresh(false)
+	if !isPreflightFresh(false) {
+		t.Fatal("host stamp should be fresh after markPreflightFresh(false)")
+	}
+	if isPreflightFresh(true) {
+		t.Fatal("a host-mode stamp must not count as a fresh sandbox-mode proof")
+	}
+
+	markPreflightFresh(true)
+	if !isPreflightFresh(true) {
+		t.Fatal("sandbox stamp should be fresh after markPreflightFresh(true)")
 	}
 }
 

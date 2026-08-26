@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -61,9 +62,11 @@ func childEnv(token string) []string {
 // runClaude spawns one headless `claude -p` and parses its JSON result. When
 // cfg.Sandbox is set (an opt-in extra, see sandbox.go), it runs inside a fresh
 // local OpenSandbox instead of directly on the host — same args, same JSON
-// parse, different exec target. This means preflight's probe session (below)
-// is sandboxed too, so it proves the *sandboxed* claude bills to the
-// subscription, not just the host one.
+// parse, different exec target. preflight() calls this same function for its
+// probe session with cfg carried through unchanged, so a sandboxed run's
+// preflight proof runs sandboxed too — as long as preflight's own freshness
+// stamp is keyed by mode (it is, see stampPath in main.go), so a host-mode
+// proof can never be mistaken for a sandboxed one.
 func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	args := []string{
 		"-p", prompt,
@@ -76,21 +79,31 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	}
 
 	var cmd *exec.Cmd
+	var cancel context.CancelFunc
 	if cfg.Sandbox {
-		id, cleanup, err := ensureSandbox(cfg, token, resolveGHToken(cfg))
+		ghToken := resolveGHToken(cfg)
+		id, cleanup, err := ensureSandbox(cfg, token, ghToken)
 		if err != nil {
 			return claudeResult{}, err
 		}
 		defer cleanup()
-		osbArgs := append([]string{"command", "run", id, "-o", "raw", "--", "claude"}, args...)
-		cmd = exec.Command("osb", osbArgs...)
-		// osb's own env — the `-e VARNAME` flags in ensureSandbox already told
-		// it which values to forward into the container by name, not value.
-		cmd.Env = childEnv(token)
+		// -e flags forwarded again here (not just at `sandbox create`): osb's
+		// exact env-forwarding semantics across separate `command run` execs
+		// aren't verified, so we don't rely on create-time forwarding persisting.
+		osbArgs := append([]string{"command", "run", id, "-o", "raw"}, sandboxEnvFlags(cfg, ghToken)...)
+		osbArgs = append(osbArgs, "--", "claude")
+		osbArgs = append(osbArgs, args...)
+		var ctx context.Context
+		ctx, cancel = context.WithTimeout(context.Background(), sandboxCommandTimeout)
+		cmd = exec.CommandContext(ctx, "osb", osbArgs...)
+		cmd.Env = sandboxProcessEnv(token, ghToken, cfg)
 	} else {
 		cmd = exec.Command("claude", args...)
 		cmd.Env = childEnv(token)
 		cmd.Dir = cfg.Workdir
+	}
+	if cancel != nil {
+		defer cancel()
 	}
 
 	out, err := cmd.Output()
@@ -115,7 +128,7 @@ func preflight(cfg Config, uc *UsageClient, token string) error {
 			"Unset them, or pass --i-know-this-bills-api to override", strings.Join(bad, ", "))
 	}
 
-	if isPreflightFresh() {
+	if isPreflightFresh(cfg.Sandbox) {
 		fmt.Println("preflight: recent metering proof found, skipping the 3-minute check")
 		return nil
 	}
@@ -145,7 +158,7 @@ func preflight(cfg Config, uc *UsageClient, token string) error {
 	}
 	fmt.Printf("preflight: OK — utilization moved %.1f%% -> %.1f%%, subscription metering confirmed\n",
 		before.FiveHour.Utilization, after.FiveHour.Utilization)
-	markPreflightFresh()
+	markPreflightFresh(cfg.Sandbox)
 	return nil
 }
 
