@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -56,6 +57,20 @@ const sandboxCommandTimeout = 60 * time.Minute
 // even when a Ctrl-C skips the normal deferred cleanup in runClaude.
 var activeSandboxes sync.Map // sandbox id (string) -> struct{}
 
+// sandboxShuttingDown and sandboxCreatesInFlight close the race where a
+// SIGINT/SIGTERM lands while `osb sandbox create` is still running: the id
+// doesn't exist yet, so activeSandboxes can't contain it, and killAllSandboxes
+// would miss it entirely. ensureSandbox registers itself in the WaitGroup
+// before that blocking call and checks the flag right after — see
+// shutdownSandboxes below.
+var sandboxShuttingDown atomic.Bool
+var sandboxCreatesInFlight sync.WaitGroup
+
+// sandboxShutdownGrace bounds how long shutdownSandboxes waits for an
+// in-flight `osb sandbox create` to finish and self-clean before giving up —
+// `osb sandbox create` normally completes in seconds, not minutes.
+const sandboxShutdownGrace = 30 * time.Second
+
 // killAllSandboxes force-kills every sandbox this process created. Go does not
 // run deferred functions on SIGINT/SIGTERM, so without this an interrupted
 // --sandbox run leaves a container mounted read-write against the real repo.
@@ -66,6 +81,26 @@ func killAllSandboxes() {
 		activeSandboxes.Delete(id)
 		return true
 	})
+}
+
+// shutdownSandboxes is what the SIGINT/SIGTERM handler (main.go) calls before
+// exiting. It kills every already-registered sandbox, then gives any sandbox
+// still mid-creation a bounded window to finish, notice the shutdown flag, and
+// kill itself (see ensureSandbox) before sweeping activeSandboxes once more.
+func shutdownSandboxes() {
+	sandboxShuttingDown.Store(true)
+	killAllSandboxes()
+
+	done := make(chan struct{})
+	go func() {
+		sandboxCreatesInFlight.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(sandboxShutdownGrace):
+	}
+	killAllSandboxes()
 }
 
 // validateSandboxConfig fills in defaults, resolves the repo to an absolute
@@ -185,6 +220,12 @@ type sandboxCreateResult struct {
 // which runner.go execs instead of calling `claude` directly. Registers the id
 // in activeSandboxes so an interrupted process can still kill it.
 func ensureSandbox(cfg Config, token, ghToken string) (id string, cleanup func(), err error) {
+	// Registered before the blocking create call below, so shutdownSandboxes
+	// (SIGINT/SIGTERM path) knows a sandbox may exist server-side even before
+	// we have an id to put in activeSandboxes.
+	sandboxCreatesInFlight.Add(1)
+	defer sandboxCreatesInFlight.Done()
+
 	volFile, err := writeVolumesFile(cfg.Repo)
 	if err != nil {
 		return "", nil, fmt.Errorf("sandbox volumes file: %w", err)
@@ -214,6 +255,16 @@ func ensureSandbox(cfg Config, token, ghToken string) (id string, cleanup func()
 	cleanup = func() {
 		_ = exec.Command("osb", "sandbox", "kill", id).Run()
 		activeSandboxes.Delete(id)
+	}
+
+	// A shutdown may have been requested while `osb sandbox create` above was
+	// still in flight — activeSandboxes.Store just above closes most of that
+	// race, but shutdownSandboxes' first killAllSandboxes sweep could already
+	// have run before this Store. Check the flag and self-clean rather than
+	// leaving a container mounted read-write against the real repo.
+	if sandboxShuttingDown.Load() {
+		cleanup()
+		return "", nil, fmt.Errorf("sandbox creation aborted: shutdown in progress")
 	}
 
 	if err := writeSandboxSecret(id, sandboxOAuthTokenFile, token); err != nil {

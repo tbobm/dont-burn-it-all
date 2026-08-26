@@ -52,14 +52,15 @@ func main() {
 // installSandboxSignalHandler ensures an interrupted --sandbox run doesn't
 // leave a container mounted read-write against the real repo. Go does not run
 // deferred functions (like runClaude's cleanup) on SIGINT/SIGTERM, so this
-// catches them explicitly and force-kills every sandbox this process created.
-// A no-op if --sandbox was never used — killAllSandboxes has nothing to do.
+// catches them explicitly and force-kills every sandbox this process created,
+// including one still being created when the signal arrives (see
+// shutdownSandboxes in sandbox.go). A no-op if --sandbox was never used.
 func installSandboxSignalHandler() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-c
-		killAllSandboxes()
+		shutdownSandboxes()
 		os.Exit(1)
 	}()
 }

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The env scrub is the safety path: a stray ANTHROPIC_API_KEY must never reach a
@@ -205,6 +206,57 @@ func TestSandboxEntrypointScriptOmitsGHExportWhenNoToken(t *testing.T) {
 	script := sandboxEntrypointScript(cfg, false)
 	if strings.Contains(script, "GH_TOKEN") {
 		t.Fatalf("expected no GH_TOKEN export when hasGHToken is false, got %q", script)
+	}
+}
+
+// shutdownSandboxes must not block indefinitely when nothing is in flight —
+// a regression here would delay every SIGINT/SIGTERM exit by the full grace
+// period even for host-mode runs that never touched a sandbox.
+func TestShutdownSandboxesReturnsQuicklyWithNoActivity(t *testing.T) {
+	sandboxShuttingDown.Store(false)
+	t.Cleanup(func() { sandboxShuttingDown.Store(false) })
+
+	start := time.Now()
+	shutdownSandboxes()
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("shutdownSandboxes took %v with no in-flight sandboxes, expected a near-instant return", elapsed)
+	}
+	if !sandboxShuttingDown.Load() {
+		t.Fatal("expected sandboxShuttingDown to be set after shutdownSandboxes")
+	}
+}
+
+// A signal arriving mid-`osb sandbox create` (before ensureSandbox has an id
+// to register) must not be missed: shutdownSandboxes should set the flag
+// immediately, then wait for the in-flight create to finish and self-clean
+// (via sandboxCreatesInFlight) rather than returning while a sandbox is still
+// being created.
+func TestShutdownSandboxesWaitsForInFlightCreate(t *testing.T) {
+	sandboxShuttingDown.Store(false)
+	t.Cleanup(func() { sandboxShuttingDown.Store(false) })
+
+	sandboxCreatesInFlight.Add(1)
+	done := make(chan struct{})
+	go func() {
+		shutdownSandboxes()
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	if !sandboxShuttingDown.Load() {
+		t.Fatal("expected sandboxShuttingDown to be set immediately, before the in-flight create finishes")
+	}
+	select {
+	case <-done:
+		t.Fatal("shutdownSandboxes returned before the in-flight create finished")
+	default:
+	}
+
+	sandboxCreatesInFlight.Done()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdownSandboxes did not return promptly after the in-flight create finished")
 	}
 }
 

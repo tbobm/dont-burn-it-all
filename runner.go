@@ -103,6 +103,12 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 		var ctx context.Context
 		ctx, cancel = context.WithTimeout(context.Background(), sandboxCommandTimeout)
 		cmd = exec.CommandContext(ctx, "osb", osbArgs...)
+		// Same scrub as the host branch below: the sandboxed claude only ever
+		// gets its token from the file ensureSandbox wrote (never from env),
+		// but `osb` itself still inherits this process's env unless told
+		// otherwise — strip billing-risk vars from it too, in case osb
+		// forwards its own env into the container.
+		cmd.Env = childEnv(token)
 	} else {
 		cmd = exec.Command("claude", args...)
 		cmd.Env = childEnv(token)
