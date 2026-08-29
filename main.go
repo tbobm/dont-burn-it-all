@@ -10,10 +10,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -31,6 +33,13 @@ type Config struct {
 	MaxUSDGuard     float64
 	AllowBillsAPI   bool
 	SkipPermissions bool
+
+	// Sandbox is an opt-in extra (like a Python package extra): none of this is
+	// checked or required unless the flag is set. See sandbox.go.
+	Sandbox      bool
+	SandboxImage string
+	Repo         string
+	GHTokenEnv   string
 }
 
 // commandHelp describes each top-level subcommand for printUsage. Later tasks
@@ -43,10 +52,27 @@ var commandHelp = map[string]string{
 }
 
 func main() {
+	installSandboxSignalHandler()
 	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "burn: "+err.Error())
 		os.Exit(1)
 	}
+}
+
+// installSandboxSignalHandler ensures an interrupted --sandbox run doesn't
+// leave a container mounted read-write against the real repo. Go does not run
+// deferred functions (like runClaude's cleanup) on SIGINT/SIGTERM, so this
+// catches them explicitly and force-kills every sandbox this process created,
+// including one still being created when the signal arrives (see
+// shutdownSandboxes in sandbox.go). A no-op if --sandbox was never used.
+func installSandboxSignalHandler() {
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-c
+		shutdownSandboxes()
+		os.Exit(1)
+	}()
 }
 
 // resolveCommand maps raw CLI args to a command name and the remaining args
@@ -82,7 +108,7 @@ func dispatch(args []string) error {
 	case "run":
 		return cmdRun(rest)
 	case "setup":
-		return setup()
+		return cmdSetup(rest)
 	case "overview":
 		return cmdOverview(rest)
 	case "connect":
@@ -126,6 +152,10 @@ func cmdRun(args []string) error {
 	fs.Float64Var(&cfg.MaxUSDGuard, "max-usd-guard", 0, "abort if reported session cost exceeds this ($); 0 disables")
 	fs.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
 	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
+	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
+	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
+	fs.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
+	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -150,7 +180,29 @@ func cmdRun(args []string) error {
 	}
 }
 
+// cmdSetup implements `burn setup`. --sandbox-image is parsed here (rather than
+// only on `run`) so `burn setup --sandbox-image foo` checks the image a real
+// `burn run --sandbox --sandbox-image foo` would actually use.
+func cmdSetup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ExitOnError)
+	var sandboxImage string
+	fs.StringVar(&sandboxImage, "sandbox-image", "burn-sandbox:latest", "image to check for --sandbox (see 'burn run --sandbox')")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return setup(sandboxImage)
+}
+
 func dryRun(cfg Config, uc *UsageClient) error {
+	// Run the same validation a real launch would hit (--jobs>1 refusal, repo
+	// resolution) so dry-run actually previews what doLaunch will do.
+	target := cfg.Workdir
+	if cfg.Sandbox {
+		if err := validateSandboxConfig(&cfg); err != nil {
+			return err
+		}
+		target = cfg.Repo + " (sandboxed, mounted read-write at /workspace)"
+	}
 	u, err := uc.Get()
 	if err != nil {
 		return err
@@ -164,7 +216,7 @@ func dryRun(cfg Config, uc *UsageClient) error {
 	fmt.Printf("5-hour usage      : %.1f%% (resets %s)\n", u.FiveHour.Utilization, u.FiveHour.ResetsAt)
 	fmt.Printf("7-day usage       : %.1f%%\n", u.SevenDay.Utilization)
 	fmt.Printf("target            : %.1f%%\n", cfg.Target)
-	fmt.Printf("planned           : %d session(s) of model %q in %s\n", cfg.Jobs, cfg.Model, cfg.Workdir)
+	fmt.Printf("planned           : %d session(s) of model %q in %s\n", cfg.Jobs, cfg.Model, target)
 	fmt.Printf("goal              : %q\n", cfg.Goal)
 	return nil
 }
@@ -172,6 +224,11 @@ func dryRun(cfg Config, uc *UsageClient) error {
 func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 	if strings.TrimSpace(cfg.Goal) == "" {
 		return fmt.Errorf("--goal is required for a launch (or use --watch)")
+	}
+	if cfg.Sandbox {
+		if err := validateSandboxConfig(&cfg); err != nil {
+			return err
+		}
 	}
 	u, err := uc.Get()
 	if err != nil {
@@ -245,13 +302,20 @@ func notify(msg string) {
 // --- preflight stamp: lets repeat manual launches skip the ~3m metering proof
 // within the same usage window. ---
 
-func stampPath() string {
+// stampPath is keyed by sandbox vs host so a metering proof from one mode
+// never skips the probe for the other — a host-mode stamp proves nothing about
+// whether the sandboxed claude bills to the subscription, and vice versa.
+func stampPath(sandbox bool) string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".claude", "burn", ".preflight-ok")
+	name := ".preflight-ok"
+	if sandbox {
+		name = ".preflight-ok-sandbox"
+	}
+	return filepath.Join(home, ".claude", "burn", name)
 }
 
-func isPreflightFresh() bool {
-	data, err := os.ReadFile(stampPath())
+func isPreflightFresh(sandbox bool) bool {
+	data, err := os.ReadFile(stampPath(sandbox))
 	if err != nil {
 		return false
 	}
@@ -262,8 +326,8 @@ func isPreflightFresh() bool {
 	return time.Since(time.Unix(ts, 0)) < 4*time.Hour
 }
 
-func markPreflightFresh() {
-	p := stampPath()
+func markPreflightFresh(sandbox bool) {
+	p := stampPath(sandbox)
 	os.MkdirAll(filepath.Dir(p), 0o755)
 	os.WriteFile(p, []byte(strconv.FormatInt(time.Now().Unix(), 10)), 0o644)
 }

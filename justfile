@@ -34,3 +34,7 @@ dist:
 clean:
     rm -f {{binary}}
     rm -rf dist
+
+# build the optional --sandbox image (requires docker; not needed for `just build`)
+build-sandbox-image:
+    docker build -f Dockerfile.sandbox -t burn-sandbox:latest .

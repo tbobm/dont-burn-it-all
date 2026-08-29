@@ -12,7 +12,7 @@ func TestAggregateByGoal(t *testing.T) {
 		{Kind: "session", Goal: "write tests", TS: "2026-08-18T10:05:20Z", StartedAt: "2026-08-18T10:05:00Z", CostUSD: 0.20, NumTurns: 8, IsError: true},
 		{Kind: "session", Goal: "refactor pkg", TS: "2026-08-18T11:00:10Z", StartedAt: "2026-08-18T11:00:00Z", CostUSD: 0.05, NumTurns: 2},
 		{Kind: "session", Goal: "refactor pkg", TS: "2026-08-18T12:00:00Z", CostUSD: 0.05, NumTurns: 3}, // pre-StartedAt record
-		{Kind: "watch", FiveHourBefore: 42},                                                             // must be ignored
+		{Kind: "watch", FiveHourBefore: 42}, // must be ignored
 	}
 
 	ov := aggregateByGoal(records)
