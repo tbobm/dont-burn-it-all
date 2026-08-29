@@ -64,6 +64,30 @@ func TestAggregateByGoal(t *testing.T) {
 	}
 }
 
+func TestAggregateByGoalIgnoresNegativeDuration(t *testing.T) {
+	records := []Record{
+		// StartedAt after TS (clock skew / bad data): must not go negative.
+		{Kind: "session", Goal: "skewed", TS: "2026-08-18T10:00:00Z", StartedAt: "2026-08-18T10:05:00Z", CostUSD: 0.10, NumTurns: 1},
+		{Kind: "session", Goal: "skewed", TS: "2026-08-18T11:00:10Z", StartedAt: "2026-08-18T11:00:00Z", CostUSD: 0.10, NumTurns: 1},
+	}
+
+	ov := aggregateByGoal(records)
+
+	if len(ov.Goals) != 1 {
+		t.Fatalf("expected 1 goal group, got %d", len(ov.Goals))
+	}
+	skewed := ov.Goals[0]
+	if skewed.Sessions != 2 {
+		t.Fatalf("expected 2 sessions, got %d", skewed.Sessions)
+	}
+	if !skewed.PartialDuration {
+		t.Fatal("expected PartialDuration=true (one record has a negative duration)")
+	}
+	if skewed.DurationSeconds != 10 {
+		t.Fatalf("expected only the valid 10s record counted, got %v", skewed.DurationSeconds)
+	}
+}
+
 func TestAggregateByGoalEmpty(t *testing.T) {
 	ov := aggregateByGoal(nil)
 	if len(ov.Goals) != 0 {

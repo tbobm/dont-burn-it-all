@@ -68,13 +68,15 @@ func aggregateByGoal(records []Record) Overview {
 		}
 
 		ts, tsErr := time.Parse(time.RFC3339, r.TS)
-		if tsErr == nil {
-			if a.first.IsZero() || ts.Before(a.first) {
-				a.first = ts
-			}
-			if ts.After(a.last) {
-				a.last = ts
-			}
+		if tsErr != nil {
+			a.partial = true
+			continue
+		}
+		if a.first.IsZero() || ts.Before(a.first) {
+			a.first = ts
+		}
+		if ts.After(a.last) {
+			a.last = ts
 		}
 
 		if r.StartedAt == "" {
@@ -82,11 +84,15 @@ func aggregateByGoal(records []Record) Overview {
 			continue
 		}
 		started, err := time.Parse(time.RFC3339, r.StartedAt)
-		if err != nil || tsErr != nil {
+		if err != nil {
 			a.partial = true
 			continue
 		}
-		a.durationSec += ts.Sub(started).Seconds()
+		if dur := ts.Sub(started); dur >= 0 {
+			a.durationSec += dur.Seconds()
+		} else {
+			a.partial = true
+		}
 	}
 
 	sort.Strings(order)
