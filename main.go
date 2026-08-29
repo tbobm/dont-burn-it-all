@@ -12,13 +12,14 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 )
 
-// Config holds all run options.
+// Config holds all `run` subcommand options.
 type Config struct {
 	Target          float64
 	Jobs            int
@@ -41,9 +42,18 @@ type Config struct {
 	GHTokenEnv   string
 }
 
+// commandHelp describes each top-level subcommand for printUsage. Later tasks
+// add entries here as they add subcommands.
+var commandHelp = map[string]string{
+	"run":      "launch or watch sessions against the subscription 5-hour quota",
+	"overview": "summarize past burn activity from the JSONL store",
+	"connect":  "verify/query an external data source (e.g. jira)",
+	"setup":    "check burn's configuration (claude, token, endpoint, dirs)",
+}
+
 func main() {
 	installSandboxSignalHandler()
-	if err := run(); err != nil {
+	if err := dispatch(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "burn: "+err.Error())
 		os.Exit(1)
 	}
@@ -65,16 +75,71 @@ func installSandboxSignalHandler() {
 	}()
 }
 
-func run() error {
-	args := os.Args[1:]
-	isSetup := len(args) > 0 && args[0] == "setup"
-	if isSetup {
-		args = args[1:]
+// resolveCommand maps raw CLI args to a command name and the remaining args
+// meant for that command's own flag set. Pure and side-effect free so it's
+// unit-testable without exec'ing anything.
+//
+// A first argument that starts with "-" is treated as a `run` flag (back-compat
+// for bare `burn --goal ...`), so it must NOT be confused with an unrecognized
+// subcommand name.
+func resolveCommand(args []string) (name string, rest []string) {
+	if len(args) == 0 {
+		return "run", args
 	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		return "help", nil
+	case "run", "setup", "overview", "connect":
+		return args[0], args[1:]
+	default:
+		if strings.HasPrefix(args[0], "-") {
+			return "run", args
+		}
+		return "unknown", args
+	}
+}
 
+func dispatch(args []string) error {
+	name, rest := resolveCommand(args)
+	switch name {
+	case "help":
+		printUsage()
+		return nil
+	case "run":
+		return cmdRun(rest)
+	case "setup":
+		return cmdSetup(rest)
+	case "overview":
+		return cmdOverview(rest)
+	case "connect":
+		return cmdConnect(rest)
+	default:
+		printUsage()
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+// printUsage lists top-level subcommands, sorted for stable output.
+func printUsage() {
+	fmt.Println("burn <command> [flags]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	names := make([]string, 0, len(commandHelp))
+	for n := range commandHelp {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Printf("  %-10s %s\n", n, commandHelp[n])
+	}
+}
+
+// cmdRun implements the original `burn --goal ... [flags]` behavior — launch
+// or watch sessions — as the `run` subcommand.
+func cmdRun(args []string) error {
 	home, _ := os.UserHomeDir()
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	cfg := Config{}
-	fs := flag.NewFlagSet("burn", flag.ContinueOnError)
 	fs.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
 	fs.IntVar(&cfg.Jobs, "jobs", 1, "number of parallel sessions to launch")
 	fs.StringVar(&cfg.Model, "model", "opus", "model for launched sessions (opus|sonnet|haiku|id)")
@@ -92,16 +157,7 @@ func run() error {
 	fs.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
 	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
 	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
-			return nil
-		}
 		return err
-	}
-
-	// setup is parsed like any other invocation (so `burn setup --sandbox-image
-	// foo` checks the right image) but dispatches before touching usage/store.
-	if isSetup {
-		return setup(cfg.SandboxImage)
 	}
 
 	uc, err := newUsageClient()
@@ -122,6 +178,19 @@ func run() error {
 	default:
 		return doLaunch(cfg, uc, store)
 	}
+}
+
+// cmdSetup implements `burn setup`. --sandbox-image is parsed here (rather than
+// only on `run`) so `burn setup --sandbox-image foo` checks the image a real
+// `burn run --sandbox --sandbox-image foo` would actually use.
+func cmdSetup(args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ExitOnError)
+	var sandboxImage string
+	fs.StringVar(&sandboxImage, "sandbox-image", "burn-sandbox:latest", "image to check for --sandbox (see 'burn run --sandbox')")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	return setup(sandboxImage)
 }
 
 func dryRun(cfg Config, uc *UsageClient) error {

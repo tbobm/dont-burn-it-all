@@ -14,6 +14,7 @@ type Record struct {
 	Kind           string  `json:"kind"`
 	SessionID      string  `json:"session_id,omitempty"`
 	Goal           string  `json:"goal,omitempty"`
+	StartedAt      string  `json:"started_at,omitempty"`
 	Model          string  `json:"model,omitempty"`
 	CostUSD        float64 `json:"cost_usd,omitempty"`
 	NumTurns       int     `json:"num_turns,omitempty"`
