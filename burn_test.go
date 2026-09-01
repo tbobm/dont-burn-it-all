@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +126,29 @@ func TestValidateSandboxConfigRejectsParallelJobs(t *testing.T) {
 	}
 }
 
+// --aws-profile must fail fast (before ever calling osb) when the host has no
+// ~/.aws to mount — a clearer error than whatever osb would report for a
+// missing bind-mount source.
+func TestValidateSandboxConfigRequiresAWSDirWhenProfileSet(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	if err := os.Mkdir(dir+"/.git", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Sandbox: true, Repo: dir, Jobs: 1, AWSProfile: "readonly"}
+	if err := validateSandboxConfig(&cfg); err == nil {
+		t.Fatal("expected error when ~/.aws does not exist, got nil")
+	}
+
+	if err := os.Mkdir(home+"/.aws", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateSandboxConfig(&cfg); err != nil {
+		t.Fatalf("unexpected error once ~/.aws exists: %v", err)
+	}
+}
+
 // The preflight freshness stamp must be mode-keyed: a host-mode metering proof
 // must never be mistaken for a sandbox-mode one (and vice versa), or a
 // --sandbox run could skip its billing-metering probe entirely on the strength
@@ -156,7 +180,10 @@ func TestPreflightStampIsolatedByMode(t *testing.T) {
 // future osb upgrade that silently changes it fails a test instead of failing
 // a real --sandbox launch.
 func TestWriteVolumesFileSchema(t *testing.T) {
-	path, err := writeVolumesFile("/tmp/some-repo")
+	path, err := writeVolumesFile([]sandboxVolume{
+		{Name: "repo", MountPath: sandboxMountPath, Host: sandboxHostVolume{Path: "/tmp/some-repo"}},
+		{Name: "aws", MountPath: sandboxAWSMountPath, Host: sandboxHostVolume{Path: "/tmp/some-aws"}, ReadOnly: true},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,14 +197,17 @@ func TestWriteVolumesFileSchema(t *testing.T) {
 	if err := json.Unmarshal(data, &vols); err != nil {
 		t.Fatalf("volumes file is not valid JSON for the expected schema: %v", err)
 	}
-	if len(vols) != 1 {
-		t.Fatalf("expected exactly one volume, got %d", len(vols))
+	if len(vols) != 2 {
+		t.Fatalf("expected exactly two volumes, got %d", len(vols))
 	}
-	if vols[0].MountPath != sandboxMountPath {
-		t.Fatalf("expected mountPath %q, got %q", sandboxMountPath, vols[0].MountPath)
+	if vols[0].MountPath != sandboxMountPath || vols[0].ReadOnly {
+		t.Fatalf("expected repo volume read-write at %q, got %+v", sandboxMountPath, vols[0])
 	}
 	if vols[0].Host.Path != "/tmp/some-repo" {
 		t.Fatalf("expected host.path %q, got %q", "/tmp/some-repo", vols[0].Host.Path)
+	}
+	if vols[1].MountPath != sandboxAWSMountPath || !vols[1].ReadOnly {
+		t.Fatalf("expected aws volume read-only at %q, got %+v", sandboxAWSMountPath, vols[1])
 	}
 }
 
@@ -189,7 +219,7 @@ func TestWriteVolumesFileSchema(t *testing.T) {
 // var name.
 func TestSandboxEntrypointScriptNoSecretsEmbedded(t *testing.T) {
 	cfg := Config{GHTokenEnv: "GH_TOKEN"}
-	script := sandboxEntrypointScript(cfg, true)
+	script := sandboxEntrypointScript(cfg, true, "", "")
 	if !strings.Contains(script, sandboxOAuthTokenFile) {
 		t.Fatal("expected script to reference the oauth token file path")
 	}
@@ -203,9 +233,51 @@ func TestSandboxEntrypointScriptNoSecretsEmbedded(t *testing.T) {
 
 func TestSandboxEntrypointScriptOmitsGHExportWhenNoToken(t *testing.T) {
 	cfg := Config{GHTokenEnv: "GH_TOKEN"}
-	script := sandboxEntrypointScript(cfg, false)
+	script := sandboxEntrypointScript(cfg, false, "", "")
 	if strings.Contains(script, "GH_TOKEN") {
 		t.Fatalf("expected no GH_TOKEN export when hasGHToken is false, got %q", script)
+	}
+}
+
+func TestSandboxEntrypointScriptExportsAWSProfileAndRegion(t *testing.T) {
+	cfg := Config{GHTokenEnv: "GH_TOKEN"}
+	script := sandboxEntrypointScript(cfg, false, "readonly", "eu-west-1")
+	if !strings.Contains(script, `export AWS_PROFILE='readonly'`) {
+		t.Fatalf("expected script to export AWS_PROFILE, got %q", script)
+	}
+	if !strings.Contains(script, `export AWS_REGION='eu-west-1'`) {
+		t.Fatalf("expected script to export AWS_REGION, got %q", script)
+	}
+}
+
+// --aws-profile is an operator-supplied flag, but it must still be quoted so
+// it can never be interpreted as shell syntax when the script runs — a naive
+// %q (Go-string, not shell) escape leaves `$(...)` command substitution live
+// inside sh's double quotes.
+func TestSandboxEntrypointScriptEscapesAWSProfileForShell(t *testing.T) {
+	cfg := Config{GHTokenEnv: "GH_TOKEN"}
+	script := sandboxEntrypointScript(cfg, false, "$(touch /tmp/pwned)", "")
+	if strings.Contains(script, `AWS_PROFILE="$(touch`) {
+		t.Fatalf("AWS_PROFILE value not shell-escaped, command substitution would execute: %q", script)
+	}
+	if !strings.Contains(script, `AWS_PROFILE='$(touch /tmp/pwned)'`) {
+		t.Fatalf("expected AWS_PROFILE single-quoted verbatim (no expansion), got %q", script)
+	}
+}
+
+func TestShellSingleQuoteEscapesEmbeddedQuote(t *testing.T) {
+	got := shellSingleQuote(`it's "quoted"`)
+	want := `'it'\''s "quoted"'`
+	if got != want {
+		t.Fatalf("shellSingleQuote() = %q, want %q", got, want)
+	}
+}
+
+func TestSandboxEntrypointScriptOmitsAWSWhenNoProfile(t *testing.T) {
+	cfg := Config{GHTokenEnv: "GH_TOKEN"}
+	script := sandboxEntrypointScript(cfg, false, "", "")
+	if strings.Contains(script, "AWS_PROFILE") || strings.Contains(script, "AWS_REGION") {
+		t.Fatalf("expected no AWS exports when awsProfile is empty, got %q", script)
 	}
 }
 
@@ -351,5 +423,91 @@ func TestNotifyCmdReceivesMessage(t *testing.T) {
 	}
 	if string(got) != "reserve hit 80%" {
 		t.Fatalf("BURN_MSG = %q, want %q", got, "reserve hit 80%")
+	}
+}
+
+// claudeArgs is the sole place the `claude` invocation is built — this locks in
+// the base flags and, critically, that passthrough args land LAST so a
+// user-supplied --model/--max-turns in the `--` passthrough wins over burn's own.
+func TestClaudeArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want []string
+	}{
+		{
+			name: "base args",
+			cfg:  Config{Model: "opus", MaxTurns: 5},
+			want: []string{"-p", "go", "--output-format", "json", "--model", "opus", "--max-turns", "5"},
+		},
+		{
+			name: "skip permissions appended",
+			cfg:  Config{Model: "opus", MaxTurns: 5, SkipPermissions: true},
+			want: []string{"-p", "go", "--output-format", "json", "--model", "opus", "--max-turns", "5", "--dangerously-skip-permissions"},
+		},
+		{
+			name: "passthrough appended last, after skip-permissions",
+			cfg: Config{Model: "opus", MaxTurns: 5, SkipPermissions: true,
+				ClaudeArgs: []string{"--resume", "abc123", "--model", "sonnet"}},
+			want: []string{"-p", "go", "--output-format", "json", "--model", "opus", "--max-turns", "5",
+				"--dangerously-skip-permissions", "--resume", "abc123", "--model", "sonnet"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := claudeArgs(tc.cfg, "go")
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("claudeArgs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateRunFlags(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{name: "no flags set", cfg: Config{Jobs: 1}},
+		{name: "aws-profile with sandbox ok", cfg: Config{Jobs: 1, Sandbox: true, AWSProfile: "ro"}},
+		{name: "aws-profile without sandbox refused", cfg: Config{Jobs: 1, AWSProfile: "ro"}, wantErr: true},
+		{name: "resume with jobs 1 ok", cfg: Config{Jobs: 1, ClaudeArgs: []string{"--resume", "x"}}},
+		{name: "resume with jobs 2 refused", cfg: Config{Jobs: 2, ClaudeArgs: []string{"--resume", "x"}}, wantErr: true},
+		{name: "wait-for-check with jobs 1 ok", cfg: Config{Jobs: 1, WaitForCheck: "spacelift"}},
+		{name: "wait-for-check with jobs 2 refused", cfg: Config{Jobs: 2, WaitForCheck: "spacelift"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRunFlags(tc.cfg)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func TestResumeInArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "absent", args: []string{"--mcp-config", "m.json"}, want: false},
+		{name: "empty", args: nil, want: false},
+		{name: "long form with value", args: []string{"--resume", "abc"}, want: true},
+		{name: "short form", args: []string{"-r", "abc"}, want: true},
+		{name: "long form equals", args: []string{"--resume=abc"}, want: true},
+		{name: "substring must not match", args: []string{"--resumed"}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resumeInArgs(tc.args); got != tc.want {
+				t.Fatalf("resumeInArgs(%v) = %v, want %v", tc.args, got, tc.want)
+			}
+		})
 	}
 }

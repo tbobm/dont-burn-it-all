@@ -22,6 +22,12 @@ type Record struct {
 	FiveHourBefore float64 `json:"five_hour_before,omitempty"`
 	FiveHourAfter  float64 `json:"five_hour_after,omitempty"`
 	SevenDay       float64 `json:"seven_day,omitempty"`
+
+	// PRURL and Checks are set on "check" records (see checks.go's
+	// waitForCheck) — the PR --wait-for-check watched, and the checks it
+	// matched, terminal or not (timeout writes whatever was seen last).
+	PRURL  string    `json:"pr_url,omitempty"`
+	Checks []ghCheck `json:"checks,omitempty"`
 }
 
 // Store appends newline-delimited JSON records. Stdlib only, safe for concurrent

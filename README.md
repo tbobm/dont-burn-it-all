@@ -58,12 +58,47 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | `--sandbox-image` | `burn-sandbox:latest` | Image for `--sandbox` sessions |
 | `--repo` | — | Repo mounted read-write into the sandbox (`--sandbox` only; defaults to `--workdir`) |
 | `--gh-token-env` | `GH_TOKEN` | Env var with a GitHub token to forward for PR creation (falls back to `gh auth token`) |
+| `--aws-profile` | — | `--sandbox` only: mount `~/.aws` read-only and export `AWS_PROFILE` inside the sandbox |
+| `--wait-for-check` | — | After launch, wait for PR checks whose name contains this substring (e.g. `spacelift`) and report pass/fail (requires `--jobs 1`) |
+| `--wait-timeout` | `30m` | Give up waiting for `--wait-for-check` after this long |
+
+`--wait-for-check` resolves the PR from the current branch of the directory the session actually
+ran in: `--repo` under `--sandbox`, or `--workdir` otherwise (host mode's default `--workdir` is
+a scratch dir with no `.git` — point `--workdir` at a real repo for host-mode use).
+
+Anything after a `--` separator is forwarded verbatim to the underlying `claude` invocation —
+see [Passing flags through to `claude`](#passing-flags-through-to-claude) below.
+
+## Passing flags through to `claude`
+
+`burn run ... -- <claude flags>` forwards everything after `--` straight to `claude -p`,
+appended after burn's own flags (so a passthrough `--model`/`--max-turns` wins over burn's
+default). Two common uses:
+
+```sh
+# Resume a session that got cut off — session ids are in worker.jsonl (`session_id` field)
+burn run --goal "..." -- --resume <session-id>
+
+# Load MCP servers for the session
+burn run --goal "..." -- --mcp-config ./m.json --strict-mcp-config
+```
+
+Caveats:
+
+- **`--resume` is scoped to `--workdir`.** Claude Code indexes session history per working
+  directory, so a resume only finds the session if `--workdir` matches what was used to create
+  it — otherwise `claude` hard-errors ("No conversation found..."), it does not silently start
+  fresh. `--resume` also refuses `--jobs > 1` (N jobs resuming one session id is meaningless).
+- **`--mcp-config` under `--sandbox`** needs a path that exists **inside** the container — a
+  host path won't resolve there.
 
 ## `burn overview`
 
 Summarizes the JSONL activity store (`--store`, same default as `run`) grouped by goal: session
 count, total cost, turns, errors, time spent, and first/last run timestamps. Add `--json` for
-scripting.
+scripting. `--wait-for-check` results are appended to the same store as `"kind":"check"` lines
+(PR URL, matched checks, pass/fail) but do not appear in the `overview` table today — read them
+directly from the JSONL if you need them.
 
 ## `burn connect`
 
@@ -111,6 +146,26 @@ sandboxes would race on the working tree and git index.
 Changes to `--sandbox` need more than unit tests to trust — see [TESTING.md](TESTING.md) for
 the required smoke test against a real local OpenSandbox server.
 
+### AWS read-only access (`--aws-profile`)
+
+`--aws-profile <name>` mounts `~/.aws` read-only into the sandbox and exports `AWS_PROFILE`
+(plus `AWS_REGION`, if set on the host) so a goal can run `aws` under a scoped, read-only
+profile. Host mode needs no flag — it already inherits your full environment.
+
+```sh
+burn run --sandbox --repo ~/code/myrepo --aws-profile readonly --goal '
+Check the ECS service status with `aws ecs describe-services ...` and summarize drift.'
+```
+
+Caveats:
+
+- **SSO tokens**: the mount carries `~/.aws/sso/cache/`, so reads work while the *host's* SSO
+  token is fresh. The container can't run `aws sso login` (no browser, and the mount is
+  read-only by design) — refresh on the host if it expires.
+- **Assumed-role profiles**: a `role_arn` + `source_profile` profile makes the AWS CLI write to
+  `~/.aws/cli/cache`, which fails against the read-only mount. Use a profile that doesn't need
+  to write a cache (e.g. a plain `sso_session` profile).
+
 ## Example: prepare pending PR reviews
 
 Spend idle quota drafting review comments in **pending** state (nothing submitted):
@@ -121,6 +176,21 @@ Review PR https://github.com/OWNER/REPO/pull/123 (`gh pr diff 123`). Draft line-
 comments and create them as a PENDING review via `gh api .../pulls/123/reviews` with no
 event — do NOT submit.'
 ```
+
+## Example: open a PR and wait for its Spacelift preview
+
+```sh
+burn run --sandbox --repo ~/code/terraform --dangerously-skip-permissions \
+  --wait-for-check spacelift --wait-timeout 20m --goal '
+Add the new S3 bucket resource, commit, push, and open a draft PR with `gh pr create`.'
+```
+
+`--wait-for-check` resolves the PR from the current branch (the session creates it — burn
+can't know the number up front), polls `gh pr checks` until every check whose name contains the
+substring is terminal or the timeout elapses, and prints a pass/fail summary. `burn` still exits
+non-zero on a failed check, the same as any other error — distinguish it
+from a refusal by the printed summary or the `"kind":"check"` store record (see `burn
+overview` above).
 
 ## Claude Code plugin
 

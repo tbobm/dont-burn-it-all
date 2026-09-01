@@ -35,6 +35,11 @@ import (
 // sandboxMountPath is where cfg.Repo is bind-mounted inside the sandbox.
 const sandboxMountPath = "/workspace"
 
+// sandboxAWSMountPath is where ~/.aws is bind-mounted read-only when
+// --aws-profile is set. Coupled to Dockerfile.sandbox's `useradd -m -u 1001 …
+// worker` — the container's $HOME is /home/worker, not root's.
+const sandboxAWSMountPath = "/home/worker/.aws"
+
 // Paths written inside the sandbox by ensureSandbox — never referenced by
 // value anywhere on the host, only by path.
 const (
@@ -127,7 +132,27 @@ func validateSandboxConfig(cfg *Config) error {
 		// (see fireworker's internal/worktree) is the upgrade if this bites.
 		return fmt.Errorf("--sandbox only supports --jobs 1 for now (mounting one repo read-write into %d sandboxes would race)", cfg.Jobs)
 	}
+	if cfg.AWSProfile != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("--aws-profile: resolving home dir: %w", err)
+		}
+		if _, err := os.Stat(filepath.Join(home, ".aws")); err != nil {
+			return fmt.Errorf("--aws-profile %q requires %s to exist on the host", cfg.AWSProfile, filepath.Join(home, ".aws"))
+		}
+	}
 	return nil
+}
+
+// resolveAWSRegion finds a region to export into the sandbox, checking
+// AWS_REGION then AWS_DEFAULT_REGION on the host. Empty return means none set
+// — the sandboxed aws CLI falls back to whatever the mounted profile/config
+// specifies.
+func resolveAWSRegion() string {
+	if v := os.Getenv("AWS_REGION"); v != "" {
+		return v
+	}
+	return os.Getenv("AWS_DEFAULT_REGION")
 }
 
 // resolveGHToken finds a GitHub token to forward for `gh pr create` inside the
@@ -154,17 +179,34 @@ func writeSandboxSecret(id, path, content string) error {
 	return cmd.Run()
 }
 
+// shellSingleQuote wraps s for safe interpolation into a POSIX sh script.
+// Go's %q escapes for a *Go* string literal, not a shell one — it leaves `$`
+// and backtick alone, which sh still expands inside double quotes (a value
+// like `$(cat /tmp/.burn-oauth-token)` would execute). Single quotes suppress
+// all shell expansion except a literal `'`, which is escaped by closing the
+// quote, emitting an escaped quote, and reopening it.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // sandboxEntrypointScript builds the wrapper `command run` execs instead of
 // `claude` directly: it exports the OAuth/GH tokens from the files
 // writeSandboxSecret wrote, then hands off to claude with argv untouched. The
-// script text itself has no secret values in it — only file paths and the
-// (non-secret) configured GH env var name — so writing it is safe by any
-// transport, argv included.
-func sandboxEntrypointScript(cfg Config, hasGHToken bool) string {
+// script text itself has no secret values in it — only file paths and
+// non-secret values (the configured GH env var name, an AWS profile/region
+// name) — so writing it is safe by any transport, argv included. Kept pure
+// (values in, no os.Getenv) so it stays table-testable on its output text.
+func sandboxEntrypointScript(cfg Config, hasGHToken bool, awsProfile, awsRegion string) string {
 	script := "#!/bin/sh\nset -e\n" +
 		fmt.Sprintf("export CLAUDE_CODE_OAUTH_TOKEN=\"$(cat %s)\"\n", sandboxOAuthTokenFile)
 	if hasGHToken {
 		script += fmt.Sprintf("export %s=\"$(cat %s)\"\n", cfg.GHTokenEnv, sandboxGHTokenFile)
+	}
+	if awsProfile != "" {
+		script += fmt.Sprintf("export AWS_PROFILE=%s\n", shellSingleQuote(awsProfile))
+		if awsRegion != "" {
+			script += fmt.Sprintf("export AWS_REGION=%s\n", shellSingleQuote(awsRegion))
+		}
 	}
 	script += "exec claude \"$@\"\n"
 	return script
@@ -177,21 +219,17 @@ type sandboxVolume struct {
 	Name      string            `json:"name"`
 	MountPath string            `json:"mountPath"`
 	Host      sandboxHostVolume `json:"host"`
+	ReadOnly  bool              `json:"readOnly,omitempty"`
 }
 
 type sandboxHostVolume struct {
 	Path string `json:"path"`
 }
 
-// writeVolumesFile writes a one-entry --volumes-file describing cfg.Repo
-// bind-mounted read-write at sandboxMountPath. The caller must remove the
-// returned path once `osb sandbox create` has read it.
-func writeVolumesFile(repo string) (string, error) {
-	data, err := json.Marshal([]sandboxVolume{{
-		Name:      "repo",
-		MountPath: sandboxMountPath,
-		Host:      sandboxHostVolume{Path: repo},
-	}})
+// writeVolumesFile writes a --volumes-file describing the given volumes. The
+// caller must remove the returned path once `osb sandbox create` has read it.
+func writeVolumesFile(vols []sandboxVolume) (string, error) {
+	data, err := json.Marshal(vols)
 	if err != nil {
 		return "", err
 	}
@@ -213,8 +251,10 @@ type sandboxCreateResult struct {
 }
 
 // ensureSandbox creates one local OpenSandbox for a single session: the
-// configured image and the repo bind-mounted read-write at sandboxMountPath.
-// No secret ever appears in an `osb sandbox create`/`command run` argument —
+// configured image, the repo bind-mounted read-write at sandboxMountPath,
+// and, when --aws-profile is set, ~/.aws bind-mounted read-only at
+// sandboxAWSMountPath. No secret ever appears in an `osb sandbox
+// create`/`command run` argument —
 // tokens are written into the sandbox filesystem via stdin (writeSandboxSecret)
 // and picked up by an entrypoint wrapper script (sandboxEntrypointScript),
 // which runner.go execs instead of calling `claude` directly. Registers the id
@@ -226,7 +266,24 @@ func ensureSandbox(cfg Config, token, ghToken string) (id string, cleanup func()
 	sandboxCreatesInFlight.Add(1)
 	defer sandboxCreatesInFlight.Done()
 
-	volFile, err := writeVolumesFile(cfg.Repo)
+	vols := []sandboxVolume{{
+		Name:      "repo",
+		MountPath: sandboxMountPath,
+		Host:      sandboxHostVolume{Path: cfg.Repo},
+	}}
+	if cfg.AWSProfile != "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", nil, fmt.Errorf("--aws-profile: resolving home dir: %w", err)
+		}
+		vols = append(vols, sandboxVolume{
+			Name:      "aws",
+			MountPath: sandboxAWSMountPath,
+			Host:      sandboxHostVolume{Path: filepath.Join(home, ".aws")},
+			ReadOnly:  true,
+		})
+	}
+	volFile, err := writeVolumesFile(vols)
 	if err != nil {
 		return "", nil, fmt.Errorf("sandbox volumes file: %w", err)
 	}
@@ -278,7 +335,7 @@ func ensureSandbox(cfg Config, token, ghToken string) (id string, cleanup func()
 		}
 	}
 	entrypoint := exec.Command("osb", "file", "write", id, sandboxEntrypointFile, "--mode", "0700")
-	entrypoint.Stdin = strings.NewReader(sandboxEntrypointScript(cfg, ghToken != ""))
+	entrypoint.Stdin = strings.NewReader(sandboxEntrypointScript(cfg, ghToken != "", cfg.AWSProfile, resolveAWSRegion()))
 	if err := entrypoint.Run(); err != nil {
 		cleanup()
 		return "", nil, fmt.Errorf("writing sandbox entrypoint: %w", err)
