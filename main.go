@@ -170,9 +170,9 @@ func cmdRun(args []string) error {
 	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
 	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
 	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
-	fs.StringVar(&cfg.Repo, "repo", "", "local repo whose current branch/PR burn operates against (mounted read-write when --sandbox; defaults to --workdir)")
+	fs.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
 	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
-	fs.StringVar(&cfg.WaitForCheck, "wait-for-check", "", "after launch, wait for PR checks whose name contains this substring (e.g. spacelift) and report pass/fail")
+	fs.StringVar(&cfg.WaitForCheck, "wait-for-check", "", "after launch, wait for PR checks (in --repo under --sandbox, else --workdir) whose name contains this substring and report pass/fail; requires --jobs 1")
 	fs.DurationVar(&cfg.WaitTimeout, "wait-timeout", 30*time.Minute, "give up waiting for --wait-for-check after this long")
 	fs.StringVar(&cfg.AWSProfile, "aws-profile", "", "AWS profile to expose read-only inside a --sandbox session (mounts ~/.aws read-only, exports AWS_PROFILE)")
 	if err := fs.Parse(args); err != nil {
@@ -225,6 +225,9 @@ func validateRunFlags(cfg Config) error {
 	}
 	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
 		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
+	}
+	if cfg.WaitForCheck != "" && cfg.Jobs > 1 {
+		return fmt.Errorf("--wait-for-check only supports --jobs 1 (with --jobs > 1 there's no single PR to watch)")
 	}
 	return nil
 }
@@ -327,7 +330,9 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 	}
 
 	if cfg.WaitForCheck != "" {
-		if err := waitForCheck(cfg, store); err != nil {
+		if res.sessions > 0 && res.errors == res.sessions {
+			fmt.Println("wait-for-check: skipped — every session errored, nothing to check")
+		} else if err := waitForCheck(cfg, store); err != nil {
 			return err
 		}
 	}

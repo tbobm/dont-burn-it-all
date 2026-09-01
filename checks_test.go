@@ -27,6 +27,28 @@ func TestParseGHChecksInvalidJSON(t *testing.T) {
 	}
 }
 
+// waitForCheckDir must match runClaude's actual exec directory (runner.go):
+// host-mode sessions always run in cfg.Workdir (cmd.Dir there is never
+// cfg.Repo), so a host-mode wait must watch cfg.Workdir, not cfg.Repo.
+func TestWaitForCheckDir(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{name: "sandbox uses repo", cfg: Config{Sandbox: true, Repo: "/repo", Workdir: "/scratch"}, want: "/repo"},
+		{name: "host uses workdir even if repo set", cfg: Config{Sandbox: false, Repo: "/repo", Workdir: "/scratch"}, want: "/scratch"},
+		{name: "host, no repo set", cfg: Config{Sandbox: false, Workdir: "/scratch"}, want: "/scratch"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := waitForCheckDir(tc.cfg); got != tc.want {
+				t.Fatalf("waitForCheckDir() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClassifyChecks(t *testing.T) {
 	cases := []struct {
 		name        string

@@ -242,11 +242,34 @@ func TestSandboxEntrypointScriptOmitsGHExportWhenNoToken(t *testing.T) {
 func TestSandboxEntrypointScriptExportsAWSProfileAndRegion(t *testing.T) {
 	cfg := Config{GHTokenEnv: "GH_TOKEN"}
 	script := sandboxEntrypointScript(cfg, false, "readonly", "eu-west-1")
-	if !strings.Contains(script, `export AWS_PROFILE="readonly"`) {
+	if !strings.Contains(script, `export AWS_PROFILE='readonly'`) {
 		t.Fatalf("expected script to export AWS_PROFILE, got %q", script)
 	}
-	if !strings.Contains(script, `export AWS_REGION="eu-west-1"`) {
+	if !strings.Contains(script, `export AWS_REGION='eu-west-1'`) {
 		t.Fatalf("expected script to export AWS_REGION, got %q", script)
+	}
+}
+
+// --aws-profile is an operator-supplied flag, but it must still be quoted so
+// it can never be interpreted as shell syntax when the script runs — a naive
+// %q (Go-string, not shell) escape leaves `$(...)` command substitution live
+// inside sh's double quotes.
+func TestSandboxEntrypointScriptEscapesAWSProfileForShell(t *testing.T) {
+	cfg := Config{GHTokenEnv: "GH_TOKEN"}
+	script := sandboxEntrypointScript(cfg, false, "$(touch /tmp/pwned)", "")
+	if strings.Contains(script, `AWS_PROFILE="$(touch`) {
+		t.Fatalf("AWS_PROFILE value not shell-escaped, command substitution would execute: %q", script)
+	}
+	if !strings.Contains(script, `AWS_PROFILE='$(touch /tmp/pwned)'`) {
+		t.Fatalf("expected AWS_PROFILE single-quoted verbatim (no expansion), got %q", script)
+	}
+}
+
+func TestShellSingleQuoteEscapesEmbeddedQuote(t *testing.T) {
+	got := shellSingleQuote(`it's "quoted"`)
+	want := `'it'\''s "quoted"'`
+	if got != want {
+		t.Fatalf("shellSingleQuote() = %q, want %q", got, want)
 	}
 }
 
@@ -435,6 +458,33 @@ func TestClaudeArgs(t *testing.T) {
 			got := claudeArgs(tc.cfg, "go")
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("claudeArgs() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateRunFlags(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{name: "no flags set", cfg: Config{Jobs: 1}},
+		{name: "aws-profile with sandbox ok", cfg: Config{Jobs: 1, Sandbox: true, AWSProfile: "ro"}},
+		{name: "aws-profile without sandbox refused", cfg: Config{Jobs: 1, AWSProfile: "ro"}, wantErr: true},
+		{name: "resume with jobs 1 ok", cfg: Config{Jobs: 1, ClaudeArgs: []string{"--resume", "x"}}},
+		{name: "resume with jobs 2 refused", cfg: Config{Jobs: 2, ClaudeArgs: []string{"--resume", "x"}}, wantErr: true},
+		{name: "wait-for-check with jobs 1 ok", cfg: Config{Jobs: 1, WaitForCheck: "spacelift"}},
+		{name: "wait-for-check with jobs 2 refused", cfg: Config{Jobs: 2, WaitForCheck: "spacelift"}, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRunFlags(tc.cfg)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}

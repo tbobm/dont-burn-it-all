@@ -56,11 +56,15 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | `--dry-run` | `false` | Print state, spawn nothing |
 | `--sandbox` | `false` | Opt-in extra: run sessions in a local [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) (Docker) instead of on the host |
 | `--sandbox-image` | `burn-sandbox:latest` | Image for `--sandbox` sessions |
-| `--repo` | — | Repo whose current branch/PR burn operates against (mounted read-write when `--sandbox`; defaults to `--workdir`) |
+| `--repo` | — | Repo mounted read-write into the sandbox (`--sandbox` only; defaults to `--workdir`) |
 | `--gh-token-env` | `GH_TOKEN` | Env var with a GitHub token to forward for PR creation (falls back to `gh auth token`) |
 | `--aws-profile` | — | `--sandbox` only: mount `~/.aws` read-only and export `AWS_PROFILE` inside the sandbox |
-| `--wait-for-check` | — | After launch, wait for PR checks whose name contains this substring (e.g. `spacelift`) and report pass/fail |
+| `--wait-for-check` | — | After launch, wait for PR checks whose name contains this substring (e.g. `spacelift`) and report pass/fail (requires `--jobs 1`) |
 | `--wait-timeout` | `30m` | Give up waiting for `--wait-for-check` after this long |
+
+`--wait-for-check` resolves the PR from the current branch of the directory the session actually
+ran in: `--repo` under `--sandbox`, or `--workdir` otherwise (host mode's default `--workdir` is
+a scratch dir with no `.git` — point `--workdir` at a real repo for host-mode use).
 
 Anything after a `--` separator is forwarded verbatim to the underlying `claude` invocation —
 see [Passing flags through to `claude`](#passing-flags-through-to-claude) below.
@@ -181,10 +185,10 @@ burn run --sandbox --repo ~/code/terraform --dangerously-skip-permissions \
 Add the new S3 bucket resource, commit, push, and open a draft PR with `gh pr create`.'
 ```
 
-`--wait-for-check` resolves the PR from the repo's current branch (the session creates it —
-burn can't know the number up front), polls `gh pr checks` until every check whose name
-contains the substring is terminal or the timeout elapses, and prints a pass/fail summary.
-`burn` still exits non-zero on a failed check, the same as any other error — distinguish it
+`--wait-for-check` resolves the PR from the current branch (the session creates it — burn
+can't know the number up front), polls `gh pr checks` until every check whose name contains the
+substring is terminal or the timeout elapses, and prints a pass/fail summary. `burn` still exits
+non-zero on a failed check, the same as any other error — distinguish it
 from a refusal by the printed summary or the `"kind":"check"` store record (see `burn
 overview` above).
 

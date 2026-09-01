@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -85,15 +86,24 @@ func fetchChecks(dir string, prNumber int) ([]ghCheck, error) {
 	return parseGHChecks(out)
 }
 
-// waitForCheck resolves the PR for cfg's repo/workdir, then polls its checks
-// until every check whose name contains cfg.WaitForCheck reaches a terminal
-// state or cfg.WaitTimeout elapses. Prints a summary and writes one "check"
-// record to the store either way.
-func waitForCheck(cfg Config, store *Store) error {
-	dir := cfg.Repo
-	if dir == "" {
-		dir = cfg.Workdir
+// waitForCheckDir picks the directory the actual session ran in, matching
+// runClaude's exec target (runner.go): --sandbox sessions operate on
+// cfg.Repo (bind-mounted into the container); host sessions always run in
+// cfg.Workdir (cmd.Dir there is never cfg.Repo), so watching cfg.Repo in host
+// mode would resolve the wrong repo's branch/PR whenever the two differ.
+func waitForCheckDir(cfg Config) string {
+	if cfg.Sandbox {
+		return cfg.Repo
 	}
+	return cfg.Workdir
+}
+
+// waitForCheck resolves the PR for the session's working directory, then
+// polls its checks until every check whose name contains cfg.WaitForCheck
+// reaches a terminal state or cfg.WaitTimeout elapses. Prints a summary and
+// writes one "check" record to the store either way.
+func waitForCheck(cfg Config, store *Store) error {
+	dir := waitForCheckDir(cfg)
 
 	prNumber, prURL, err := prForBranch(dir)
 	if err != nil {
@@ -106,17 +116,20 @@ func waitForCheck(cfg Config, store *Store) error {
 	for {
 		checks, err := fetchChecks(dir, prNumber)
 		if err != nil {
-			return fmt.Errorf("--wait-for-check: %w", err)
-		}
-		var pending, failed bool
-		matched, pending, failed = classifyChecks(checks, cfg.WaitForCheck)
-		if len(matched) > 0 && !pending {
-			printCheckSummary(matched)
-			writeCheckRecord(store, prURL, matched, failed)
-			if failed {
-				return fmt.Errorf("--wait-for-check: %q check(s) failed on %s", cfg.WaitForCheck, prURL)
+			// A single flaky `gh` call (rate limit, network blip) must not
+			// kill a 30-minute wait — log and keep polling until the deadline.
+			fmt.Fprintf(os.Stderr, "wait-for-check: poll failed, retrying: %v\n", err)
+		} else {
+			var pending, failed bool
+			matched, pending, failed = classifyChecks(checks, cfg.WaitForCheck)
+			if len(matched) > 0 && !pending {
+				printCheckSummary(matched)
+				writeCheckRecord(store, prURL, matched, failed)
+				if failed {
+					return fmt.Errorf("--wait-for-check: %q check(s) failed on %s", cfg.WaitForCheck, prURL)
+				}
+				return nil
 			}
-			return nil
 		}
 		if time.Now().After(deadline) {
 			writeCheckRecord(store, prURL, matched, true)

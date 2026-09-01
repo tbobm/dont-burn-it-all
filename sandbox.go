@@ -179,6 +179,16 @@ func writeSandboxSecret(id, path, content string) error {
 	return cmd.Run()
 }
 
+// shellSingleQuote wraps s for safe interpolation into a POSIX sh script.
+// Go's %q escapes for a *Go* string literal, not a shell one — it leaves `$`
+// and backtick alone, which sh still expands inside double quotes (a value
+// like `$(cat /tmp/.burn-oauth-token)` would execute). Single quotes suppress
+// all shell expansion except a literal `'`, which is escaped by closing the
+// quote, emitting an escaped quote, and reopening it.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // sandboxEntrypointScript builds the wrapper `command run` execs instead of
 // `claude` directly: it exports the OAuth/GH tokens from the files
 // writeSandboxSecret wrote, then hands off to claude with argv untouched. The
@@ -193,9 +203,9 @@ func sandboxEntrypointScript(cfg Config, hasGHToken bool, awsProfile, awsRegion 
 		script += fmt.Sprintf("export %s=\"$(cat %s)\"\n", cfg.GHTokenEnv, sandboxGHTokenFile)
 	}
 	if awsProfile != "" {
-		script += fmt.Sprintf("export AWS_PROFILE=%q\n", awsProfile)
+		script += fmt.Sprintf("export AWS_PROFILE=%s\n", shellSingleQuote(awsProfile))
 		if awsRegion != "" {
-			script += fmt.Sprintf("export AWS_REGION=%q\n", awsRegion)
+			script += fmt.Sprintf("export AWS_REGION=%s\n", shellSingleQuote(awsRegion))
 		}
 	}
 	script += "exec claude \"$@\"\n"
