@@ -1,6 +1,6 @@
 {
   "name": "dont-burn-it-all",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Deliberately use your Claude Code subscription 5-hour quota with parallel sessions, stopping at a threshold. Meters against the real Anthropic usage endpoint.",
   "author": "tbobm",
   "commands": [
