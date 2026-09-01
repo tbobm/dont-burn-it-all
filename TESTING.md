@@ -41,9 +41,11 @@ Edit `~/.sandbox.toml` before starting the server:
   Do **not** rely on `OPENSANDBOX_INSECURE_SERVER=YES` — treat it the way you'd
   treat any other auth bypass flag.
 - Set `allowed_host_paths` under `[storage]` to include wherever your smoke-test
-  repo will live (e.g. `["/tmp"]`). An empty list means **nothing** is allowed,
-  not everything — the config file's own comment says the opposite; don't
-  trust it.
+  repo will live (e.g. `["/tmp"]`), and, if testing `--aws-profile`, `$HOME/.aws`
+  too (e.g. `["/tmp", "/Users/you/.aws"]`). An empty list means **nothing** is
+  allowed, not everything — the config file's own comment says the opposite;
+  don't trust it. Missing the `.aws` path here fails the `--aws-profile` mount
+  server-side, not in burn.
 
 ```sh
 uvx opensandbox-server            # foreground or backgrounded; binds 127.0.0.1:8080
@@ -98,6 +100,39 @@ Verify, in order:
    argv: run a longer sandboxed goal in one terminal and `ps auxww | grep osb`
    in another while it's in flight. You should see `osb command run` with a
    path argument (`sh /tmp/.burn-entrypoint.sh ...`), never a raw token.
+
+## 3b. `--aws-profile` smoke test
+
+Requires a real AWS profile (a read-only one) and `$HOME/.aws` added to
+`allowed_host_paths` above.
+
+```sh
+./burn run --sandbox --repo /tmp/burn-smoke --aws-profile <readonly-profile> \
+  --max-turns 3 --dangerously-skip-permissions \
+  --goal "run \`aws sts get-caller-identity\` and write the account id to caller.txt"
+```
+
+Verify: `cat /tmp/burn-smoke/caller.txt` shows a real account id, and note which
+profile shape was used — a plain `sso_session` profile works read-only; a
+`role_arn` + `source_profile` profile fails (it needs to write
+`~/.aws/cli/cache`, which the read-only mount blocks) — that's a documented
+limitation, not a bug.
+
+## 3c. `--wait-for-check` smoke test
+
+Against a real repo with an open PR that has at least one pending or recent
+check:
+
+```sh
+cd ~/code/some-repo && git checkout -b burn-wait-smoke
+./burn run --repo . --max-turns 3 --dangerously-skip-permissions \
+  --wait-for-check <substring-matching-a-real-check-name> --wait-timeout 5m \
+  --goal "touch a harmless file, commit, push, and open a draft PR with \`gh pr create\`"
+```
+
+Verify: burn polls (`wait-for-check: watching ...`), prints a per-check summary once
+terminal, exits 0 on pass / non-zero on fail, and appends a `"kind":"check"` line to
+`~/.claude/burn/worker.jsonl`.
 
 ## 4. Cleanup
 

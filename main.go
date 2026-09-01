@@ -41,6 +41,20 @@ type Config struct {
 	SandboxImage string
 	Repo         string
 	GHTokenEnv   string
+
+	// ClaudeArgs are extra flags forwarded verbatim to `claude` (everything
+	// after a `--` separator on the command line), e.g. --resume <id>,
+	// --mcp-config <path>. See claudeArgs in runner.go.
+	ClaudeArgs []string
+
+	// WaitForCheck/WaitTimeout drive the post-launch PR-check wait. See checks.go.
+	WaitForCheck string
+	WaitTimeout  time.Duration
+
+	// AWSProfile, when set, mounts ~/.aws read-only into a --sandbox session
+	// and exports AWS_PROFILE there. Host mode needs no flag — it already
+	// inherits the whole env (see childEnv in runner.go).
+	AWSProfile string
 }
 
 // commandHelp describes each top-level subcommand for printUsage. Later tasks
@@ -156,11 +170,18 @@ func cmdRun(args []string) error {
 	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
 	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
 	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
-	fs.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
+	fs.StringVar(&cfg.Repo, "repo", "", "local repo whose current branch/PR burn operates against (mounted read-write when --sandbox; defaults to --workdir)")
 	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
+	fs.StringVar(&cfg.WaitForCheck, "wait-for-check", "", "after launch, wait for PR checks whose name contains this substring (e.g. spacelift) and report pass/fail")
+	fs.DurationVar(&cfg.WaitTimeout, "wait-timeout", 30*time.Minute, "give up waiting for --wait-for-check after this long")
+	fs.StringVar(&cfg.AWSProfile, "aws-profile", "", "AWS profile to expose read-only inside a --sandbox session (mounts ~/.aws read-only, exports AWS_PROFILE)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Everything after a `--` separator is forwarded verbatim to `claude`
+	// (--resume, --mcp-config, ...). Go's flag package consumes the `--` and
+	// returns the remainder here.
+	cfg.ClaudeArgs = fs.Args()
 
 	uc, err := newUsageClient()
 	if err != nil {
@@ -217,6 +238,12 @@ func dryRun(cfg Config, uc *UsageClient) error {
 		}
 		target = cfg.Repo + " (sandboxed, mounted read-write at /workspace)"
 	}
+	if cfg.AWSProfile != "" && !cfg.Sandbox {
+		return fmt.Errorf("--aws-profile only applies to --sandbox sessions — host mode already inherits your env, just export AWS_PROFILE=%s", cfg.AWSProfile)
+	}
+	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
+		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
+	}
 	u, err := uc.Get()
 	if err != nil {
 		return err
@@ -237,6 +264,15 @@ func dryRun(cfg Config, uc *UsageClient) error {
 	}
 	fmt.Printf("planned           : %d session(s) of model %q in %s\n", cfg.Jobs, cfg.Model, target)
 	fmt.Printf("goal              : %q\n", cfg.Goal)
+	if len(cfg.ClaudeArgs) > 0 {
+		fmt.Printf("claude passthrough: %v\n", cfg.ClaudeArgs)
+	}
+	if cfg.AWSProfile != "" {
+		fmt.Printf("aws profile       : %s (mounted read-only at %s)\n", cfg.AWSProfile, sandboxAWSMountPath)
+	}
+	if cfg.WaitForCheck != "" {
+		fmt.Printf("wait for check    : %q (timeout %s)\n", cfg.WaitForCheck, cfg.WaitTimeout)
+	}
 	return nil
 }
 
@@ -248,6 +284,12 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 		if err := validateSandboxConfig(&cfg); err != nil {
 			return err
 		}
+	}
+	if cfg.AWSProfile != "" && !cfg.Sandbox {
+		return fmt.Errorf("--aws-profile only applies to --sandbox sessions — host mode already inherits your env, just export AWS_PROFILE=%s", cfg.AWSProfile)
+	}
+	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
+		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
 	}
 	u, err := uc.Get()
 	if err != nil {
@@ -275,6 +317,12 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 	if aerr == nil {
 		fmt.Printf("5-hour usage now %.1f%% — %.1f%% headroom to target %.1f%%\n",
 			after.FiveHour.Utilization, cfg.Target-after.FiveHour.Utilization, cfg.Target)
+	}
+
+	if cfg.WaitForCheck != "" {
+		if err := waitForCheck(cfg, store); err != nil {
+			return err
+		}
 	}
 	return nil
 }

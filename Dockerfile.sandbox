@@ -5,8 +5,13 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates jq \
+    git curl ca-certificates jq unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# AWS CLI v2 — needed only if a --sandbox goal uses --aws-profile.
+RUN curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip \
+    && unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install \
+    && rm -rf /tmp/aws /tmp/awscliv2.zip
 
 # Node.js (required by Claude Code).
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
