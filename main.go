@@ -290,12 +290,22 @@ func watch(cfg Config, uc *UsageClient, store *Store) error {
 	}
 }
 
-// notify emits a terminal bell plus a best-effort macOS notification.
+// notify emits a terminal bell, a best-effort macOS notification, and, when
+// BURN_NOTIFY_CMD is set, runs it via `sh -c` with the message in BURN_MSG so
+// the alert can be forwarded anywhere (webhook, Slack, another agent's inbox).
 func notify(msg string) {
 	fmt.Print("\a")
 	fmt.Println("NOTICE: " + msg)
 	if _, err := exec.LookPath("osascript"); err == nil {
 		exec.Command("osascript", "-e", fmt.Sprintf("display notification %q with title \"dont-burn-it-all\"", msg)).Run()
+	}
+	if c := os.Getenv("BURN_NOTIFY_CMD"); c != "" {
+		cmd := exec.Command("sh", "-c", c)
+		cmd.Env = append(os.Environ(), "BURN_MSG="+msg)
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "burn: BURN_NOTIFY_CMD failed: "+err.Error())
+		}
 	}
 }
 

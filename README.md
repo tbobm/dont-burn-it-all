@@ -69,6 +69,19 @@ Verifies and queries an external data source. Today: `burn connect jira --jql "<
 shells out to [`acli`](https://developer.atlassian.com/cloud/acli/) (install it and run `acli
 jira auth login` first) and prints matching issues as `KEY<tab>summary` lines.
 
+## Notifications
+
+By default a target hit rings the terminal bell, prints `NOTICE:`, and shows a
+macOS notification. Set `BURN_NOTIFY_CMD` to forward it anywhere — the command
+runs via `sh -c` with the message in `$BURN_MSG`:
+
+```sh
+# Slack incoming webhook
+BURN_NOTIFY_CMD='curl -s -XPOST "$SLACK_WEBHOOK" -d "{\"text\":\"$BURN_MSG\"}"' burn --watch --target 80
+# append to a file another process tails
+BURN_NOTIFY_CMD='echo "$BURN_MSG" >> ~/.claude/burn/alerts.log' burn --watch --target 80
+```
+
 ## Safety
 
 `burn` only spends **subscription** quota, never pay-per-token API. It refuses to run when a
