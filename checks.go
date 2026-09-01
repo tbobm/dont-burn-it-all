@@ -54,18 +54,6 @@ func classifyChecks(checks []ghCheck, pattern string) (matched []ghCheck, pendin
 	return matched, pending, failed
 }
 
-// currentBranch names dir's checked-out branch, best-effort, purely for
-// clearer error messages — never fatal on its own.
-func currentBranch(dir string) string {
-	cmd := exec.Command("git", "rev-parse", "--abbrev-ref", "HEAD")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return "unknown"
-	}
-	return strings.TrimSpace(string(out))
-}
-
 // prForBranch resolves the PR (number and URL) for dir's current branch via
 // `gh pr view`. The session creates the PR, so burn can't know the number up
 // front — it always resolves from the branch.
@@ -74,7 +62,7 @@ func prForBranch(dir string) (number int, url string, err error) {
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		return 0, "", fmt.Errorf("no PR found for branch %q in %s: %w", currentBranch(dir), dir, err)
+		return 0, "", fmt.Errorf("no PR found for the current branch in %s: %w", dir, err)
 	}
 	var res struct {
 		Number int    `json:"number"`
@@ -124,31 +112,29 @@ func waitForCheck(cfg Config, store *Store) error {
 		matched, pending, failed = classifyChecks(checks, cfg.WaitForCheck)
 		if len(matched) > 0 && !pending {
 			printCheckSummary(matched)
-			store.Write(Record{
-				TS:      time.Now().UTC().Format(time.RFC3339),
-				Kind:    "check",
-				PRURL:   prURL,
-				Checks:  matched,
-				IsError: failed,
-			})
+			writeCheckRecord(store, prURL, matched, failed)
 			if failed {
 				return fmt.Errorf("--wait-for-check: %q check(s) failed on %s", cfg.WaitForCheck, prURL)
 			}
 			return nil
 		}
 		if time.Now().After(deadline) {
-			store.Write(Record{
-				TS:      time.Now().UTC().Format(time.RFC3339),
-				Kind:    "check",
-				PRURL:   prURL,
-				Checks:  matched,
-				IsError: true,
-			})
-			return fmt.Errorf("--wait-for-check: timed out after %s waiting for %q checks on %s (branch %q)",
-				cfg.WaitTimeout, cfg.WaitForCheck, prURL, currentBranch(dir))
+			writeCheckRecord(store, prURL, matched, true)
+			return fmt.Errorf("--wait-for-check: timed out after %s waiting for %q checks on %s",
+				cfg.WaitTimeout, cfg.WaitForCheck, prURL)
 		}
 		time.Sleep(checkPollInterval)
 	}
+}
+
+func writeCheckRecord(store *Store, prURL string, matched []ghCheck, isError bool) {
+	store.Write(Record{
+		TS:      time.Now().UTC().Format(time.RFC3339),
+		Kind:    "check",
+		PRURL:   prURL,
+		Checks:  matched,
+		IsError: isError,
+	})
 }
 
 func printCheckSummary(matched []ghCheck) {

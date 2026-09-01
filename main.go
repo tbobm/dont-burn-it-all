@@ -216,6 +216,19 @@ func cmdSetup(args []string) error {
 	return setup(sandboxImage)
 }
 
+// validateRunFlags checks the flag combinations that don't depend on live
+// usage data — shared by dryRun and doLaunch so a preview never lies about
+// what a real launch would refuse.
+func validateRunFlags(cfg Config) error {
+	if cfg.AWSProfile != "" && !cfg.Sandbox {
+		return fmt.Errorf("--aws-profile only applies to --sandbox sessions — host mode already inherits your env, just export AWS_PROFILE=%s", cfg.AWSProfile)
+	}
+	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
+		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
+	}
+	return nil
+}
+
 // breachMessage returns a non-empty reason once usage is at/over a threshold, checking the
 // 5-hour window first, then the 7-day window (weeklyTarget <= 0 disables that check).
 func breachMessage(u Usage, target, weeklyTarget float64) string {
@@ -238,11 +251,8 @@ func dryRun(cfg Config, uc *UsageClient) error {
 		}
 		target = cfg.Repo + " (sandboxed, mounted read-write at /workspace)"
 	}
-	if cfg.AWSProfile != "" && !cfg.Sandbox {
-		return fmt.Errorf("--aws-profile only applies to --sandbox sessions — host mode already inherits your env, just export AWS_PROFILE=%s", cfg.AWSProfile)
-	}
-	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
-		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
+	if err := validateRunFlags(cfg); err != nil {
+		return err
 	}
 	u, err := uc.Get()
 	if err != nil {
@@ -285,11 +295,8 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 			return err
 		}
 	}
-	if cfg.AWSProfile != "" && !cfg.Sandbox {
-		return fmt.Errorf("--aws-profile only applies to --sandbox sessions — host mode already inherits your env, just export AWS_PROFILE=%s", cfg.AWSProfile)
-	}
-	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
-		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
+	if err := validateRunFlags(cfg); err != nil {
+		return err
 	}
 	u, err := uc.Get()
 	if err != nil {
