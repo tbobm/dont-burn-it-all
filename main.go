@@ -48,6 +48,7 @@ type Config struct {
 var commandHelp = map[string]string{
 	"run":      "launch or watch sessions against the subscription 5-hour quota",
 	"overview": "summarize past burn activity from the JSONL store",
+	"process":  "loop sessions over the work items a connected source returns",
 	"connect":  "verify/query an external data source (e.g. jira)",
 	"setup":    "check burn's configuration (claude, token, endpoint, dirs)",
 }
@@ -90,7 +91,7 @@ func resolveCommand(args []string) (name string, rest []string) {
 	switch args[0] {
 	case "-h", "--help", "help":
 		return "help", nil
-	case "run", "setup", "overview", "connect":
+	case "run", "setup", "overview", "connect", "process":
 		return args[0], args[1:]
 	default:
 		if strings.HasPrefix(args[0], "-") {
@@ -114,6 +115,8 @@ func dispatch(args []string) error {
 		return cmdOverview(rest)
 	case "connect":
 		return cmdConnect(rest)
+	case "process":
+		return cmdProcess(rest)
 	default:
 		printUsage()
 		return fmt.Errorf("unknown command %q", args[0])
@@ -135,18 +138,15 @@ func printUsage() {
 	}
 }
 
-// cmdRun implements the original `burn --goal ... [flags]` behavior — launch
-// or watch sessions — as the `run` subcommand.
-func cmdRun(args []string) error {
-	home, _ := os.UserHomeDir()
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
-	cfg := Config{}
+// registerRunFlags wires every session-shaping flag onto fs. Both `burn run`
+// and `burn process` use it, so the safety flags (targets, guards, sandbox)
+// cannot drift between the attended and unattended paths. `run`-only flags
+// (--goal, --watch) are registered by cmdRun itself.
+func registerRunFlags(fs *flag.FlagSet, cfg *Config, home string) {
 	fs.Float64Var(&cfg.Target, "target", 25, "stop/refuse once 5-hour utilization reaches this percent")
 	fs.Float64Var(&cfg.WeeklyTarget, "weekly-target", 0, "stop/refuse once 7-day utilization reaches this percent; 0 disables")
 	fs.IntVar(&cfg.Jobs, "jobs", 1, "number of parallel sessions to launch")
 	fs.StringVar(&cfg.Model, "model", "opus", "model for launched sessions (opus|sonnet|haiku|id)")
-	fs.StringVar(&cfg.Goal, "goal", "", "the task each session works on (required for launch)")
-	fs.BoolVar(&cfg.Watch, "watch", false, "governor mode: poll usage and notify at target, spawn nothing")
 	fs.StringVar(&cfg.Workdir, "workdir", filepath.Join(os.TempDir(), "dont-burn-it-all-scratch"), "working dir for sessions (a scratch dir, NOT a real repo)")
 	fs.StringVar(&cfg.Store, "store", filepath.Join(home, ".claude", "burn", "worker.jsonl"), "JSONL log path")
 	fs.IntVar(&cfg.MaxTurns, "max-turns", 30, "max agent turns per session")
@@ -156,8 +156,19 @@ func cmdRun(args []string) error {
 	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
 	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
 	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
-	fs.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
+	fs.StringVar(&cfg.Repo, "repo", "", "local repo to work in: mounted read-write into the sandbox with --sandbox, used as the session working dir otherwise")
 	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
+}
+
+// cmdRun implements the original `burn --goal ... [flags]` behavior — launch
+// or watch sessions — as the `run` subcommand.
+func cmdRun(args []string) error {
+	home, _ := os.UserHomeDir()
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	cfg := Config{}
+	registerRunFlags(fs, &cfg, home)
+	fs.StringVar(&cfg.Goal, "goal", "", "the task each session works on (required for launch)")
+	fs.BoolVar(&cfg.Watch, "watch", false, "governor mode: poll usage and notify at target, spawn nothing")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -321,14 +332,28 @@ func notify(msg string) {
 	if _, err := exec.LookPath("osascript"); err == nil {
 		exec.Command("osascript", "-e", fmt.Sprintf("display notification %q with title \"dont-burn-it-all\"", msg)).Run()
 	}
-	if c := os.Getenv("BURN_NOTIFY_CMD"); c != "" {
-		cmd := exec.Command("sh", "-c", c)
-		cmd.Env = append(os.Environ(), "BURN_MSG="+msg)
-		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintln(os.Stderr, "burn: BURN_NOTIFY_CMD failed: "+err.Error())
-		}
+	runHook("BURN_NOTIFY_CMD", msg, nil)
+}
+
+// runHook runs the shell command in the named env var via `sh -c`, with the
+// message in BURN_MSG plus any extra KEY=VALUE pairs. An unset var is a no-op
+// returning nil. One idiom covers every hook burn exposes (BURN_NOTIFY_CMD,
+// BURN_DIGEST_CMD, BURN_CLAIM_CMD), and the error is returned so a caller like
+// claimItem can treat a non-zero exit as a decision rather than a warning.
+func runHook(envVar, msg string, extra []string) error {
+	c := os.Getenv(envVar)
+	if c == "" {
+		return nil
 	}
+	cmd := exec.Command("sh", "-c", c)
+	cmd.Env = append(os.Environ(), "BURN_MSG="+msg)
+	cmd.Env = append(cmd.Env, extra...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	err := cmd.Run()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "burn: "+envVar+" failed: "+err.Error())
+	}
+	return err
 }
 
 // --- preflight stamp: lets repeat manual launches skip the ~3m metering proof

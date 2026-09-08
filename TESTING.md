@@ -108,3 +108,56 @@ rm -rf /tmp/burn-smoke
 
 `~/.sandbox.toml` and `~/.opensandbox/config.toml` can stay — steps 2 onward
 are instant to repeat on the next smoke test.
+
+## 4. Jira source smoke test (`connect jira`, `process jira`)
+
+**Required** before merging any change to `jira.go`, `connect.go`, or `process.go`.
+
+Unit tests cover the pure parts (JQL building, mode resolution, prompt rendering, dedup, stop
+conditions, digest formatting) against a fixture. What they cannot cover is the **`acli`
+contract**: whether `--fields summary,status,labels` is accepted, and whether the JSON keys
+`fields.status.name` / `fields.labels` actually come back on the site being queried. Only a
+real `acli` proves that — the same reason `--sandbox` needs a smoke test.
+
+Needs `acli` on PATH, `acli jira auth login` done, and a Jira project you may write to.
+
+```sh
+go build -o burn . && go vet ./... && gofmt -l . && go test ./...
+
+# 1. the acli field contract: status and labels must be populated, not blank
+./burn connect jira --project <KEY> --label <LABEL>
+#    expect: KEY<tab>STATUS<tab>SUMMARY — a blank middle column means the
+#    status field did not parse, and --mode auto would silently enrich everything
+
+# 2. raw JQL still passes through untouched
+./burn connect jira --jql 'project = <KEY> ORDER BY created DESC'
+
+# 3. dry-run: query compiles, tickets are picked, prompt renders
+./burn process jira --project <KEY> --label <LABEL> --mode auto --dry-run
+
+# 4. one real enrich pass against ONE ticket, then check the comment in Jira
+./burn process jira --project <KEY> --label <LABEL> --mode enrich --max-items 1 \
+  --target 90 --dangerously-skip-permissions --digest /tmp/burn-digest.md
+
+# 5. dedup: the same command must now skip that ticket
+./burn process jira --project <KEY> --label <LABEL> --mode enrich --max-items 1 \
+  --target 90 --dangerously-skip-permissions
+#    expect: "no items to process (N matched, 1 already done)"
+
+# 6. kill switch refuses to start, before the preflight probe is spent
+touch ~/.claude/burn/STOP
+./burn process jira --project <KEY> --label <LABEL> --mode enrich --redo \
+  --target 90 --dangerously-skip-permissions
+#    expect: "burn: stop file ... exists", exit 1, NO preflight, no sessions.
+#    A stop file created mid-run instead stops before the next ticket and the
+#    digest reads "stopped: stop file present" — check that by touching it
+#    while a --max-items 2 run is on its first ticket.
+rm ~/.claude/burn/STOP
+
+# 7. per-item view of what ran
+./burn overview --group item
+```
+
+An `--mode implement` pass is worth one manual run per change to the implement prompt: confirm
+the PR it opens is a **draft**, on a `claude/<KEY>-*` branch, and that the default branch has no
+new commits.

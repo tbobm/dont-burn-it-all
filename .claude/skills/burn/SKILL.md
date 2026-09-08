@@ -30,6 +30,10 @@ STOP — do not try to burn. `[warn]` lines are fine to proceed past.
 
 ## 2. Pick a mode
 
+- **Process a backlog** (one session per Jira ticket, unattended): this is `burn process jira`
+  and it has its own skill — use **`burn-jira`** instead of this one. Anything about working
+  labelled tickets, running while OOO/overnight/at the weekend, or reporting on such a run
+  belongs there.
 - **Launch** (spend quota on a task): needs `--goal`. Each launch runs `--jobs` sessions to
   completion and stops — it does not loop. Start each launch deliberately.
   ```sh
@@ -60,3 +64,9 @@ setup-token)`, unset `ANTHROPIC_API_KEY`) and stop.
 
 Pick a `--target` above the current 5-hour % (see `burn --dry-run --goal x`); a target below it
 makes launch refuse immediately by design.
+
+## 4. Reporting
+
+`burn overview` summarizes past sessions grouped by goal; `burn overview --group item` breaks a
+`burn process` run down per work item. `BURN_NOTIFY_CMD` forwards a target-hit alert anywhere
+(`$BURN_MSG` via `sh -c`).

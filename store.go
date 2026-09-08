@@ -8,12 +8,17 @@ import (
 )
 
 // Record is one line in the JSONL log — either a finished session ("session")
-// or a governor reading ("watch").
+// or a governor reading ("watch"). ItemKey/ItemSource/Mode are set only by
+// `burn process`, which is what lets a re-run skip work already done and
+// `burn overview --group item` break a run down per work item.
 type Record struct {
 	TS             string  `json:"ts"`
 	Kind           string  `json:"kind"`
 	SessionID      string  `json:"session_id,omitempty"`
 	Goal           string  `json:"goal,omitempty"`
+	ItemKey        string  `json:"item_key,omitempty"`
+	ItemSource     string  `json:"item_source,omitempty"`
+	Mode           string  `json:"mode,omitempty"`
 	StartedAt      string  `json:"started_at,omitempty"`
 	Model          string  `json:"model,omitempty"`
 	CostUSD        float64 `json:"cost_usd,omitempty"`
