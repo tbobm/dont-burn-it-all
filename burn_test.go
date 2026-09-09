@@ -521,6 +521,41 @@ func TestValidateRunFlags(t *testing.T) {
 	}
 }
 
+func TestValidateForegroundConfig(t *testing.T) {
+	base := Config{Foreground: true, Jobs: 1, Model: "opus", MaxTurns: 30}
+	cases := []struct {
+		name    string
+		mutate  func(*Config)
+		wantErr bool
+	}{
+		{name: "not foreground: every other check is skipped", mutate: func(c *Config) {
+			c.Foreground = false
+			c.Jobs = 2
+			c.Sandbox = true
+			c.SkipPermissions = true
+			c.MaxUSDGuard = 5
+		}, wantErr: false},
+		{name: "foreground alone is fine", mutate: func(*Config) {}, wantErr: false},
+		{name: "foreground rejects jobs>1", mutate: func(c *Config) { c.Jobs = 2 }, wantErr: true},
+		{name: "foreground rejects sandbox", mutate: func(c *Config) { c.Sandbox = true }, wantErr: true},
+		{name: "foreground rejects skip-permissions", mutate: func(c *Config) { c.SkipPermissions = true }, wantErr: true},
+		{name: "foreground rejects max-usd-guard", mutate: func(c *Config) { c.MaxUSDGuard = 5 }, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.mutate(&cfg)
+			err := validateForegroundConfig(cfg)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestResumeInArgs(t *testing.T) {
 	cases := []struct {
 		name string

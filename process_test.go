@@ -284,6 +284,22 @@ func TestValidateProcessConfig(t *testing.T) {
 		}
 	})
 
+	t.Run("foreground needs no skip-permissions flag either", func(t *testing.T) {
+		pc := base()
+		pc.Run.SkipPermissions, pc.Run.Foreground = false, true
+		if err := validateProcessConfig(&pc); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("foreground still rejects parallel jobs", func(t *testing.T) {
+		pc := base()
+		pc.Run.SkipPermissions, pc.Run.Foreground, pc.Run.Jobs = false, true, 2
+		if err := validateProcessConfig(&pc); err == nil {
+			t.Fatal("one terminal can't attach to more than one interactive session — expected a refusal")
+		}
+	})
+
 	t.Run("host repo becomes the session workdir", func(t *testing.T) {
 		dir := t.TempDir()
 		if err := os.MkdirAll(filepath.Join(dir, ".git"), 0o755); err != nil {

@@ -211,7 +211,9 @@ func cmdProcess(args []string) error {
 	if err := os.MkdirAll(pc.Run.Workdir, 0o755); err != nil {
 		return err
 	}
-	if err := preflight(pc.Run, uc, uc.Token()); err != nil {
+	if pc.Run.SkipPreflight {
+		fmt.Println("preflight: skipped (--skip-preflight)")
+	} else if err := preflight(pc.Run, uc, uc.Token()); err != nil {
 		return err
 	}
 
@@ -243,9 +245,15 @@ func validateProcessConfig(pc *processConfig) error {
 	if pc.Mode == modeImplement && pc.Run.Repo == "" {
 		return fmt.Errorf("--mode implement needs --repo pointing at the repository to work in")
 	}
-	if !pc.Run.DryRun && !pc.Run.SkipPermissions {
+	if err := validateForegroundConfig(pc.Run); err != nil {
+		return err
+	}
+	// --foreground is the third valid path alongside --dangerously-skip-permissions
+	// and --dry-run: each item's session is attended, so there's no headless
+	// permission prompt to hang on.
+	if !pc.Run.DryRun && !pc.Run.SkipPermissions && !pc.Run.Foreground {
 		return fmt.Errorf("burn process runs unattended, so it needs --dangerously-skip-permissions " +
-			"(pair it with --sandbox --repo to isolate writes), or --dry-run to preview")
+			"(pair it with --sandbox --repo to isolate writes), or --foreground to attend each item, or --dry-run to preview")
 	}
 	if pc.Run.Sandbox {
 		return validateSandboxConfig(&pc.Run)
@@ -425,14 +433,17 @@ func (s stopState) reason() string {
 	return ""
 }
 
-// itemOutcome is one processed item's result, for the digest.
+// itemOutcome is one processed item's result, for the digest. Foreground
+// marks a session run via --foreground, where CostUSD is always 0 (unknown,
+// not zero) — see Record.Foreground in store.go.
 type itemOutcome struct {
-	Key     string
-	Summary string
-	Mode    string
-	Outcome string
-	Turns   int
-	CostUSD float64
+	Key        string
+	Summary    string
+	Mode       string
+	Outcome    string
+	Turns      int
+	CostUSD    float64
+	Foreground bool
 }
 
 // runDigest is everything the end-of-run report needs.
@@ -496,10 +507,14 @@ func formatDigest(d runDigest) string {
 	} else {
 		b.WriteString("| item | mode | outcome | turns | cost |\n|---|---|---|---|---|\n")
 		for _, it := range d.Items {
+			cost := fmt.Sprintf("$%.4f", it.CostUSD)
+			if it.Foreground {
+				cost = "n/a"
+			}
 			// An error outcome is claude's own text; a pipe in it would break
 			// the row this digest is read as.
-			fmt.Fprintf(&b, "| %s | %s | %s | %d | $%.4f |\n",
-				it.Key, it.Mode, strings.ReplaceAll(it.Outcome, "|", "/"), it.Turns, it.CostUSD)
+			fmt.Fprintf(&b, "| %s | %s | %s | %d | %s |\n",
+				it.Key, it.Mode, strings.ReplaceAll(it.Outcome, "|", "/"), it.Turns, cost)
 		}
 	}
 
@@ -538,6 +553,9 @@ func processDryRun(pc processConfig, uc *UsageClient, query string, picked []Wor
 			u.FiveHour.Utilization, u.SevenDay.Utilization, pc.Run.Target, pc.Run.WeeklyTarget)
 	} else {
 		fmt.Printf("usage now         : unavailable: %v\n", err)
+	}
+	if pc.Run.Foreground {
+		fmt.Println("foreground        : yes (each item attended interactively; turns from the transcript, cost n/a)")
 	}
 	fmt.Println()
 	for _, it := range picked {
@@ -653,6 +671,7 @@ func processItems(pc processConfig, uc *UsageClient, store *Store, query string,
 				NumTurns:       res.NumTurns,
 				IsError:        failed,
 				FiveHourBefore: before.FiveHour.Utilization,
+				Foreground:     itemCfg.Foreground,
 			})
 
 			mu.Lock()
@@ -662,12 +681,13 @@ func processItems(pc processConfig, uc *UsageClient, store *Store, query string,
 				consecut = 0
 			}
 			d.Items = append(d.Items, itemOutcome{
-				Key:     it.Key,
-				Summary: it.Summary,
-				Mode:    mode,
-				Outcome: outcome,
-				Turns:   res.NumTurns,
-				CostUSD: res.TotalCostUSD,
+				Key:        it.Key,
+				Summary:    it.Summary,
+				Mode:       mode,
+				Outcome:    outcome,
+				Turns:      res.NumTurns,
+				CostUSD:    res.TotalCostUSD,
+				Foreground: itemCfg.Foreground,
 			})
 			mu.Unlock()
 
