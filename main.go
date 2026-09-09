@@ -35,6 +35,7 @@ type Config struct {
 	MaxUSDGuard     float64
 	AllowBillsAPI   bool
 	SkipPermissions bool
+	SkipPreflight   bool
 
 	// Sandbox is an opt-in extra (like a Python package extra): none of this is
 	// checked or required unless the flag is set. See sandbox.go.
@@ -180,6 +181,7 @@ func registerRunFlags(fs *flag.FlagSet, cfg *Config, home string) {
 	fs.Float64Var(&cfg.MaxUSDGuard, "max-usd-guard", 0, "abort if reported session cost exceeds this ($); 0 disables")
 	fs.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
 	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
+	fs.BoolVar(&cfg.SkipPreflight, "skip-preflight", false, "skip the subscription-metering proof (risk: a hostile env may bill pay-per-token API undetected)")
 	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
 	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
 	fs.StringVar(&cfg.Repo, "repo", "", "local repo: mounted read-write into the sandbox with --sandbox; also becomes the session working dir for 'burn process --mode implement' without --sandbox (plain 'burn run' always uses --workdir)")
@@ -345,7 +347,9 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 		return err
 	}
 
-	if err := preflight(cfg, uc, uc.Token()); err != nil {
+	if cfg.SkipPreflight {
+		fmt.Println("preflight: skipped (--skip-preflight)")
+	} else if err := preflight(cfg, uc, uc.Token()); err != nil {
 		return err
 	}
 
