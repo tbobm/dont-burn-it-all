@@ -41,13 +41,33 @@ func checkHostileEnv() []string {
 	return found
 }
 
+// awsCredEnvVars are the AWS SDK/CLI credential env vars, which take
+// precedence over AWS_PROFILE. Only scrubbed when a --sandbox session sets
+// --aws-profile — that combination means the operator wants the sandboxed
+// agent limited to the mounted profile, and any ambient AWS_ACCESS_KEY_ID/etc.
+// on the host (e.g. from an unrelated admin-role shell) would otherwise
+// silently override it if `osb` forwards this process's env into the
+// container. Host mode never scrubs these — it's documented to inherit the
+// full env.
+var awsCredEnvVars = []string{
+	"AWS_ACCESS_KEY_ID",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
+}
+
 // childEnv builds a scrubbed environment: billing-risk vars removed, the resolved
 // subscription token pinned as CLAUDE_CODE_OAUTH_TOKEN. This deterministically
-// forces subscription auth regardless of the parent shell's state.
-func childEnv(token string) []string {
+// forces subscription auth regardless of the parent shell's state. scrubAWS
+// additionally drops the AWS credential env vars — see awsCredEnvVars.
+func childEnv(token string, scrubAWS bool) []string {
 	drop := map[string]bool{"CLAUDE_CODE_OAUTH_TOKEN": true}
 	for _, k := range hostileEnvVars {
 		drop[k] = true
+	}
+	if scrubAWS {
+		for _, k := range awsCredEnvVars {
+			drop[k] = true
+		}
 	}
 	var env []string
 	for _, kv := range os.Environ() {
@@ -129,11 +149,13 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 		// gets its token from the file ensureSandbox wrote (never from env),
 		// but `osb` itself still inherits this process's env unless told
 		// otherwise — strip billing-risk vars from it too, in case osb
-		// forwards its own env into the container.
-		cmd.Env = childEnv(token)
+		// forwards its own env into the container. Also scrub AWS credential
+		// vars when --aws-profile is set, so an ambient host credential can't
+		// override the mounted profile (see awsCredEnvVars).
+		cmd.Env = childEnv(token, cfg.AWSProfile != "")
 	} else {
 		cmd = exec.Command("claude", args...)
-		cmd.Env = childEnv(token)
+		cmd.Env = childEnv(token, false)
 		cmd.Dir = cfg.Workdir
 	}
 	if cancel != nil {

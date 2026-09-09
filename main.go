@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,6 +55,17 @@ type Config struct {
 	// AWSProfile, when set, mounts ~/.aws read-only into a --sandbox session
 	// and exports AWS_PROFILE there. Host mode needs no flag — it already
 	// inherits the whole env (see childEnv in runner.go).
+	//
+	// This is NOT profile-scoped: the whole ~/.aws directory is mounted
+	// read-only, so a sandboxed agent can `export AWS_PROFILE=<other>` or
+	// `aws --profile <other>` to use any profile present on the host, not
+	// just this one. Read-only protects the files from being changed, not
+	// which profile the sandboxed process is allowed to assume.
+	// ponytail: true per-profile scoping needs resolving just this profile's
+	// credentials host-side (e.g. `aws configure export-credentials`) and
+	// injecting only those into the sandbox instead of mounting the
+	// directory — a bigger change that needs its own live-osb verification,
+	// tracked as a follow-up rather than done here.
 	AWSProfile string
 }
 
@@ -216,12 +228,22 @@ func cmdSetup(args []string) error {
 	return setup(sandboxImage)
 }
 
+// envVarNamePattern matches a valid POSIX shell/env variable name. cfg.GHTokenEnv
+// is interpolated into the sandbox entrypoint script as a bare `export NAME=...`
+// target (sandboxEntrypointScript in sandbox.go) — it names a variable, so
+// shell-quoting it (which is for values) wouldn't help; rejecting anything that
+// isn't a plain identifier is what actually closes the injection.
+var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 // validateRunFlags checks the flag combinations that don't depend on live
 // usage data — shared by dryRun and doLaunch so a preview never lies about
 // what a real launch would refuse.
 func validateRunFlags(cfg Config) error {
 	if cfg.AWSProfile != "" && !cfg.Sandbox {
 		return fmt.Errorf("--aws-profile only applies to --sandbox sessions — host mode already inherits your env, just export AWS_PROFILE=%s", cfg.AWSProfile)
+	}
+	if !envVarNamePattern.MatchString(cfg.GHTokenEnv) {
+		return fmt.Errorf("--gh-token-env %q is not a valid env var name", cfg.GHTokenEnv)
 	}
 	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
 		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
@@ -281,7 +303,7 @@ func dryRun(cfg Config, uc *UsageClient) error {
 		fmt.Printf("claude passthrough: %v\n", cfg.ClaudeArgs)
 	}
 	if cfg.AWSProfile != "" {
-		fmt.Printf("aws profile       : %s (mounted read-only at %s)\n", cfg.AWSProfile, sandboxAWSMountPath)
+		fmt.Printf("aws profile       : %s (default; mounts ALL profiles in ~/.aws read-only at %s — the sandboxed agent can select any of them, not just this one)\n", cfg.AWSProfile, sandboxAWSMountPath)
 	}
 	if cfg.WaitForCheck != "" {
 		fmt.Printf("wait for check    : %q (timeout %s)\n", cfg.WaitForCheck, cfg.WaitTimeout)

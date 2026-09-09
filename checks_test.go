@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"os/exec"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -47,6 +50,44 @@ func TestWaitForCheckDir(t *testing.T) {
 			}
 		})
 	}
+}
+
+// classifyFetchResult is what used to be fetchChecks' silent `out, _ :=
+// cmd.Output()`: a real gh failure (expired auth, deleted PR) must surface
+// its stderr, while a gh exit code that still printed valid JSON (pending or
+// failed check, expected mid-poll) must not be treated as an error at all.
+func TestClassifyFetchResult(t *testing.T) {
+	t.Run("valid JSON despite a non-nil exec error is not an error", func(t *testing.T) {
+		out := []byte(`[{"name":"spacelift/prod","state":"COMPLETED","bucket":"fail","link":"https://x/1"}]`)
+		checks, err := classifyFetchResult(out, errors.New("exit status 1"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(checks) != 1 {
+			t.Fatalf("got %d checks, want 1", len(checks))
+		}
+	})
+
+	t.Run("unparseable stdout with a real gh failure surfaces stderr", func(t *testing.T) {
+		cmd := exec.Command("sh", "-c", "echo 'gh: authentication failed' 1>&2; exit 4")
+		_, runErr := cmd.Output()
+		if runErr == nil {
+			t.Fatal("expected the helper command to fail")
+		}
+		_, err := classifyFetchResult([]byte(""), runErr)
+		if err == nil {
+			t.Fatal("expected an error for unparseable stdout")
+		}
+		if !strings.Contains(err.Error(), "authentication failed") {
+			t.Fatalf("error %q does not surface gh's stderr", err)
+		}
+	})
+
+	t.Run("unparseable stdout with no exec error still reports a failure", func(t *testing.T) {
+		if _, err := classifyFetchResult([]byte("not json"), nil); err == nil {
+			t.Fatal("expected a parse failure error")
+		}
+	})
 }
 
 func TestClassifyChecks(t *testing.T) {

@@ -149,8 +149,14 @@ the required smoke test against a real local OpenSandbox server.
 ### AWS read-only access (`--aws-profile`)
 
 `--aws-profile <name>` mounts `~/.aws` read-only into the sandbox and exports `AWS_PROFILE`
-(plus `AWS_REGION`, if set on the host) so a goal can run `aws` under a scoped, read-only
-profile. Host mode needs no flag — it already inherits your full environment.
+(plus `AWS_REGION`, if set on the host) so a goal defaults to running `aws` under a chosen
+read-only profile. Host mode needs no flag — it already inherits your full environment.
+
+**Not profile-scoped**: the whole `~/.aws` directory is mounted, not just `<name>`'s section —
+read-only protects the files from being *changed*, not which profile the sandboxed agent is
+allowed to *use*. It can `export AWS_PROFILE=<other>` or pass `--profile <other>` to select any
+profile present in that directory. Only put a profile-less `--aws-profile` you'd be fine with
+the agent using *any* of your local profiles for.
 
 ```sh
 burn run --sandbox --repo ~/code/myrepo --aws-profile readonly --goal '
