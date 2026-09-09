@@ -41,13 +41,33 @@ func checkHostileEnv() []string {
 	return found
 }
 
+// awsCredEnvVars are the AWS SDK/CLI credential env vars, which take
+// precedence over AWS_PROFILE. Only scrubbed when a --sandbox session sets
+// --aws-profile — that combination means the operator wants the sandboxed
+// agent limited to the mounted profile, and any ambient AWS_ACCESS_KEY_ID/etc.
+// on the host (e.g. from an unrelated admin-role shell) would otherwise
+// silently override it if `osb` forwards this process's env into the
+// container. Host mode never scrubs these — it's documented to inherit the
+// full env.
+var awsCredEnvVars = []string{
+	"AWS_ACCESS_KEY_ID",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
+}
+
 // childEnv builds a scrubbed environment: billing-risk vars removed, the resolved
 // subscription token pinned as CLAUDE_CODE_OAUTH_TOKEN. This deterministically
-// forces subscription auth regardless of the parent shell's state.
-func childEnv(token string) []string {
+// forces subscription auth regardless of the parent shell's state. scrubAWS
+// additionally drops the AWS credential env vars — see awsCredEnvVars.
+func childEnv(token string, scrubAWS bool) []string {
 	drop := map[string]bool{"CLAUDE_CODE_OAUTH_TOKEN": true}
 	for _, k := range hostileEnvVars {
 		drop[k] = true
+	}
+	if scrubAWS {
+		for _, k := range awsCredEnvVars {
+			drop[k] = true
+		}
 	}
 	var env []string
 	for _, kv := range os.Environ() {
@@ -59,15 +79,11 @@ func childEnv(token string) []string {
 	return append(env, "CLAUDE_CODE_OAUTH_TOKEN="+token)
 }
 
-// runClaude spawns one headless `claude -p` and parses its JSON result. When
-// cfg.Sandbox is set (an opt-in extra, see sandbox.go), it runs inside a fresh
-// local OpenSandbox instead of directly on the host — same args, same JSON
-// parse, different exec target. preflight() calls this same function for its
-// probe session with cfg carried through unchanged, so a sandboxed run's
-// preflight proof runs sandboxed too — as long as preflight's own freshness
-// stamp is keyed by mode (it is, see stampPath in main.go), so a host-mode
-// proof can never be mistaken for a sandboxed one.
-func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
+// claudeArgs builds the full `claude` arg list: burn's own flags, then
+// cfg.ClaudeArgs (from a `--` separator on `burn run`) appended last, so a
+// user-supplied --model/--max-turns overrides burn's default. Pure — no
+// exec — so it's table-testable like resolveCommand in main.go.
+func claudeArgs(cfg Config, prompt string) []string {
 	args := []string{
 		"-p", prompt,
 		"--output-format", "json",
@@ -77,6 +93,32 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	if cfg.SkipPermissions {
 		args = append(args, "--dangerously-skip-permissions")
 	}
+	return append(args, cfg.ClaudeArgs...)
+}
+
+// resumeInArgs reports whether a passthrough arg list resumes an existing
+// session (-r/--resume[=id]). Used to refuse --jobs > 1 (N jobs resuming one
+// session id is garbage) and to skip the launch nonce (it would inject a
+// literal "(nonce=N)" into a resumed conversation's next turn).
+func resumeInArgs(args []string) bool {
+	for _, a := range args {
+		if a == "-r" || a == "--resume" || strings.HasPrefix(a, "--resume=") {
+			return true
+		}
+	}
+	return false
+}
+
+// runClaude spawns one headless `claude -p` and parses its JSON result. When
+// cfg.Sandbox is set (an opt-in extra, see sandbox.go), it runs inside a fresh
+// local OpenSandbox instead of directly on the host — same args, same JSON
+// parse, different exec target. preflight() calls this same function for its
+// probe session with cfg carried through unchanged, so a sandboxed run's
+// preflight proof runs sandboxed too — as long as preflight's own freshness
+// stamp is keyed by mode (it is, see stampPath in main.go), so a host-mode
+// proof can never be mistaken for a sandboxed one.
+func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
+	args := claudeArgs(cfg, prompt)
 
 	var cmd *exec.Cmd
 	var cancel context.CancelFunc
@@ -107,11 +149,13 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 		// gets its token from the file ensureSandbox wrote (never from env),
 		// but `osb` itself still inherits this process's env unless told
 		// otherwise — strip billing-risk vars from it too, in case osb
-		// forwards its own env into the container.
-		cmd.Env = childEnv(token)
+		// forwards its own env into the container. Also scrub AWS credential
+		// vars when --aws-profile is set, so an ambient host credential can't
+		// override the mounted profile (see awsCredEnvVars).
+		cmd.Env = childEnv(token, cfg.AWSProfile != "")
 	} else {
 		cmd = exec.Command("claude", args...)
-		cmd.Env = childEnv(token)
+		cmd.Env = childEnv(token, false)
 		cmd.Dir = cfg.Workdir
 	}
 	if cancel != nil {
@@ -154,6 +198,9 @@ func preflight(cfg Config, uc *UsageClient, token string) error {
 
 	probe := cfg
 	probe.MaxTurns = 1
+	// Never forward passthrough args to the probe — a --resume there would
+	// resume the user's real session for a throwaway "ok" turn.
+	probe.ClaudeArgs = nil
 	if _, err := runClaude(probe, token, "Reply with the single word: ok"); err != nil {
 		return fmt.Errorf("preflight probe session failed: %w", err)
 	}
@@ -204,8 +251,13 @@ func launch(cfg Config, uc *UsageClient, token string, store *Store) (launchResu
 			defer func() { <-sem }()
 
 			start := time.Now().UTC()
-			// Nonce only defeats identical-prompt server caching; the work is real.
-			prompt := fmt.Sprintf("%s (nonce=%d)", cfg.Goal, i)
+			// Nonce only defeats identical-prompt server caching; the work is
+			// real. Skip it on --resume — a resumed conversation gets its next
+			// real turn, not a literal "(nonce=N)" tacked onto the goal.
+			prompt := cfg.Goal
+			if !resumeInArgs(cfg.ClaudeArgs) {
+				prompt = fmt.Sprintf("%s (nonce=%d)", cfg.Goal, i)
+			}
 			res, runErr := runClaude(cfg, token, prompt)
 
 			mu.Lock()
