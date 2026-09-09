@@ -125,10 +125,13 @@ check:
 
 ```sh
 cd ~/code/some-repo && git checkout -b burn-wait-smoke
-./burn run --repo . --max-turns 3 --dangerously-skip-permissions \
+./burn run --workdir . --max-turns 3 --dangerously-skip-permissions \
   --wait-for-check <substring-matching-a-real-check-name> --wait-timeout 5m \
   --goal "touch a harmless file, commit, push, and open a draft PR with \`gh pr create\`"
 ```
+
+Host mode always runs in `--workdir`, never `--repo` (`--repo` only matters under `--sandbox`) —
+`waitForCheckDir` in checks.go picks the same directory `runClaude` actually executed in.
 
 Verify: burn polls (`wait-for-check: watching ...`), prints a per-check summary once
 terminal, exits 0 on pass / non-zero on fail, and appends a `"kind":"check"` line to
