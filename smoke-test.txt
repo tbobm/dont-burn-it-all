@@ -1,0 +1,1 @@
+burn wait-for-check smoke test
