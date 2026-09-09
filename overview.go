@@ -41,12 +41,29 @@ type goalAcc struct {
 	first, last             time.Time
 }
 
-// aggregateByGoal groups "session"-kind records by Goal and computes
-// per-goal totals, sorted alphabetically by goal, plus an overall Total row.
+// aggregateByGoal groups "session"-kind records by Goal.
+func aggregateByGoal(records []Record) Overview {
+	return aggregate(records, func(r Record) string { return r.Goal })
+}
+
+// aggregateByItem groups "session"-kind records by the work item they
+// processed. Records with no item (a plain `burn run` launch) are kept under
+// one "(no item)" row rather than dropped, so totals still add up.
+func aggregateByItem(records []Record) Overview {
+	return aggregate(records, func(r Record) string {
+		if r.ItemKey == "" {
+			return "(no item)"
+		}
+		return r.ItemKey
+	})
+}
+
+// aggregate groups "session"-kind records by key(record) and computes
+// per-group totals, sorted alphabetically by key, plus an overall Total row.
 // "watch"-kind records are ignored — they track usage polling, not sessions.
 // Sessions written before StartedAt existed count 0 duration and mark
 // PartialDuration so the output doesn't silently under-report.
-func aggregateByGoal(records []Record) Overview {
+func aggregate(records []Record, key func(Record) string) Overview {
 	byGoal := map[string]*goalAcc{}
 	var order []string
 
@@ -54,11 +71,12 @@ func aggregateByGoal(records []Record) Overview {
 		if r.Kind != "session" {
 			continue
 		}
-		a, ok := byGoal[r.Goal]
+		k := key(r)
+		a, ok := byGoal[k]
 		if !ok {
 			a = &goalAcc{}
-			byGoal[r.Goal] = a
-			order = append(order, r.Goal)
+			byGoal[k] = a
+			order = append(order, k)
 		}
 		a.sessions++
 		a.cost += r.CostUSD
@@ -181,12 +199,16 @@ func loadRecords(path string) ([]Record, error) {
 func cmdOverview(args []string) error {
 	home, _ := os.UserHomeDir()
 	fs := flag.NewFlagSet("overview", flag.ExitOnError)
-	var storePath string
+	var storePath, group string
 	var asJSON bool
 	fs.StringVar(&storePath, "store", filepath.Join(home, ".claude", "burn", "worker.jsonl"), "JSONL log path")
 	fs.BoolVar(&asJSON, "json", false, "emit JSON instead of a table")
+	fs.StringVar(&group, "group", "goal", "what to group sessions by: goal|item (item is the per-work-item view of `burn process` runs)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if group != "goal" && group != "item" {
+		return fmt.Errorf("--group must be goal or item, got %q", group)
 	}
 
 	records, err := loadRecords(storePath)
@@ -194,7 +216,10 @@ func cmdOverview(args []string) error {
 		return fmt.Errorf("reading store %s: %w", storePath, err)
 	}
 
-	ov := aggregateByGoal(records)
+	ov, header := aggregateByGoal(records), "GOAL"
+	if group == "item" {
+		ov, header = aggregateByItem(records), "ITEM"
+	}
 	if len(ov.Goals) == 0 {
 		fmt.Println("no burn activity recorded yet")
 		return nil
@@ -205,13 +230,16 @@ func cmdOverview(args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(ov)
 	}
-	printOverviewTable(ov)
+	printOverviewTable(ov, header)
 	return nil
 }
 
-func printOverviewTable(ov Overview) {
+// printOverviewTable prints one row per group. header names the grouping
+// dimension ("GOAL" or "ITEM"); GoalSummary.Goal carries whichever key was
+// grouped on.
+func printOverviewTable(ov Overview, header string) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "GOAL\tSESSIONS\tCOST\tTURNS\tERRORS\tTIME SPENT\tFIRST RUN\tLAST RUN")
+	fmt.Fprintln(w, header+"\tSESSIONS\tCOST\tTURNS\tERRORS\tTIME SPENT\tFIRST RUN\tLAST RUN")
 	for _, g := range ov.Goals {
 		fmt.Fprintln(w, formatGoalRow(g))
 	}

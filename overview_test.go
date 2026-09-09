@@ -124,3 +124,39 @@ func TestLoadRecordsSkipsMalformedLines(t *testing.T) {
 		t.Fatalf("expected 2 valid records (malformed line skipped), got %d", len(records))
 	}
 }
+
+func TestAggregateByItem(t *testing.T) {
+	records := []Record{
+		{Kind: "session", Goal: "process jira enrich", ItemKey: "DEMO-1", NumTurns: 3, CostUSD: 0.1},
+		{Kind: "session", Goal: "process jira enrich", ItemKey: "DEMO-1", NumTurns: 2, IsError: true},
+		{Kind: "session", Goal: "process jira enrich", ItemKey: "DEMO-2", NumTurns: 5},
+		{Kind: "session", Goal: "write tests"},
+		{Kind: "watch"},
+	}
+
+	byItem := aggregateByItem(records)
+	if len(byItem.Goals) != 3 {
+		t.Fatalf("expected DEMO-1, DEMO-2 and (no item); got %d rows: %+v", len(byItem.Goals), byItem.Goals)
+	}
+	// Alphabetical: "(no item)" sorts before the keys.
+	if byItem.Goals[0].Goal != "(no item)" || byItem.Goals[0].Sessions != 1 {
+		t.Fatalf("a plain run must still be counted somewhere; got %+v", byItem.Goals[0])
+	}
+	demo1 := byItem.Goals[1]
+	if demo1.Goal != "DEMO-1" || demo1.Sessions != 2 || demo1.Turns != 5 || demo1.Errors != 1 {
+		t.Fatalf("DEMO-1: got %+v", demo1)
+	}
+	if byItem.Total.Sessions != 4 {
+		t.Fatalf("total sessions: got %d, want 4 (watch records excluded)", byItem.Total.Sessions)
+	}
+
+	// Grouping by goal over the same records keeps the run in one row.
+	byGoal := aggregateByGoal(records)
+	if len(byGoal.Goals) != 2 {
+		t.Fatalf("expected 2 goal rows, got %+v", byGoal.Goals)
+	}
+	if byGoal.Total.Sessions != byItem.Total.Sessions {
+		t.Fatalf("both groupings must total the same sessions: %d vs %d",
+			byGoal.Total.Sessions, byItem.Total.Sessions)
+	}
+}

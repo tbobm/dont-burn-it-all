@@ -76,12 +76,35 @@ func setup(sandboxImage string) error {
 	// requirement at launch time, and only if --sandbox was actually passed.
 	checkSandboxExtra(ok, warn, sandboxImage)
 
+	// 7. The Jira source (`burn connect jira`, `burn process jira`) is the same
+	// kind of extra: informational only, since run/overview/setup work without
+	// it.
+	checkJiraExtra(ok, warn)
+
 	fmt.Println()
 	if hardFail {
 		return fmt.Errorf("setup incomplete — resolve the [FAIL] items above")
 	}
 	fmt.Println("setup OK — try: burn --dry-run --goal x")
 	return nil
+}
+
+// checkJiraExtra reports the Jira source's prerequisites as informational
+// only (never hardFail) — `burn run`/`overview`/`setup` work with none of it.
+// The auth probe is a real query (`acli jira project list`) rather than a
+// version check, because acli on PATH with no active login is the failure mode
+// that actually bites an unattended `burn process` run at 2am.
+func checkJiraExtra(ok, warn func(string)) {
+	if _, err := exec.LookPath("acli"); err != nil {
+		warn("jira source: `acli` not found — only needed for `burn connect jira` / `burn process jira`")
+		return
+	}
+	ok("jira source: `acli` found on PATH")
+	if err := exec.Command("acli", "jira", "project", "list", "--limit", "1").Run(); err != nil {
+		warn("jira source: acli is not authenticated (or cannot reach Jira) — run `acli jira auth login`")
+	} else {
+		ok("jira source: acli authenticated and Jira reachable")
+	}
 }
 
 // checkSandboxExtra reports --sandbox prerequisites as informational only

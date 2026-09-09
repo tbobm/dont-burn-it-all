@@ -28,10 +28,11 @@ burn run --goal "write tests for pkg/foo" --jobs 4 --target 80   # spend quota u
 burn run --watch --target 80                   # monitor only: notify when 5h usage hits 80%
 burn run --target 60 --weekly-target 40 --goal "..."   # stop at 60% of 5h AND 40% of 7d, whichever hits first
 burn overview                                  # summarize past sessions: cost, turns, errors, time spent
-burn connect jira --jql 'project = DEMO AND status = "To Refine"'   # list matching Jira issues
+burn connect jira --label claude-ready              # list matching Jira issues
+burn process jira --label claude-ready --dry-run   # preview one session per labelled issue
 ```
 
-`burn <command>` dispatches to a subcommand (`run`, `overview`, `connect`, `setup`); bare
+`burn <command>` dispatches to a subcommand (`run`, `process`, `overview`, `connect`, `setup`); bare
 `burn --goal ...` / `burn --dry-run ...` (no subcommand keyword) remain aliases for `burn run ...`.
 
 Each `--goal` launch runs `--jobs` sessions to completion and stops — you start each launch.
@@ -56,7 +57,7 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | `--dry-run` | `false` | Print state, spawn nothing |
 | `--sandbox` | `false` | Opt-in extra: run sessions in a local [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) (Docker) instead of on the host |
 | `--sandbox-image` | `burn-sandbox:latest` | Image for `--sandbox` sessions |
-| `--repo` | — | Repo mounted read-write into the sandbox (`--sandbox` only; defaults to `--workdir`) |
+| `--repo` | — | Repo to work in: mounted read-write into the sandbox with `--sandbox`, otherwise the session working dir |
 | `--gh-token-env` | `GH_TOKEN` | Env var with a GitHub token to forward for PR creation (falls back to `gh auth token`) |
 | `--aws-profile` | — | `--sandbox` only: mount `~/.aws` read-only and export `AWS_PROFILE` inside the sandbox |
 | `--wait-for-check` | — | After launch, wait for PR checks whose name contains this substring (e.g. `spacelift`) and report pass/fail (requires `--jobs 1`) |
@@ -92,25 +93,85 @@ Caveats:
 - **`--mcp-config` under `--sandbox`** needs a path that exists **inside** the container — a
   host path won't resolve there.
 
+## `burn process` — unattended work over a backlog
+
+`burn run` runs one goal N times. `burn process` runs one session **per work item** a connected
+source returns, which is what makes an evening, weekend, or out-of-office run useful:
+
+```sh
+burn process jira --project SUDS --label claude-ready --mode enrich --jobs 2 \
+  --target 80 --weekly-target 50 --max-items 6 --max-runtime 4h \
+  --dangerously-skip-permissions --digest ~/.claude/burn/digest.md
+```
+
+Selection uses `--project` / `--label` / `--status` (compiled to JQL and printed as the `query:`
+line) or a raw `--query "<JQL>"`. Items already completed in the store are skipped, so a repeated
+or resumed run never redoes work; `--redo` overrides that.
+
+| Mode | Each session | Needs |
+|---|---|---|
+| `enrich` (default) | reads the item, posts **one** refinement comment | acli only |
+| `implement` | branch, change, tests, **draft** PR, comment linking it | `--repo` |
+| `auto` | `enrich` for early-status items, `implement` for ready ones | `--repo` |
+
+`enrich` touches no repository, so it is the only mode allowed `--jobs > 1`. Both built-in
+prompts carry their guardrails — draft PRs only, never push to the default branch, never merge,
+never force-push, comment instead of guessing on an underspecified item.
+`--prompt-template FILE` replaces them with a `text/template` over `.Key .Summary .Status
+.Labels .Source .Mode .Repo`.
+
+### `burn process` flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--project` / `--label` / `--status` | — | Compiled into the source's query (at least one of project/label) |
+| `--query` | — | Raw source query (JQL); mutually exclusive with the shorthand |
+| `--mode` | `enrich` | `enrich` \| `implement` \| `auto` |
+| `--max-items` | `5` | Hard cap on items started this run |
+| `--max-errors` | `2` | Stop after N consecutive failures (0 disables) |
+| `--max-runtime` | `0` | Stop starting items past this duration (e.g. `8h`) |
+| `--stop-file` | `~/.claude/burn/STOP` | Kill switch: `touch` it and a run in flight stops before its next item, and a new run refuses to start |
+| `--redo` | `false` | Reprocess items the store records as done |
+| `--prompt-template` | — | `text/template` file overriding the built-in prompt |
+| `--digest` | — | Write the run digest as markdown to this path |
+| `--notify-each` | `false` | Notify per item, not only at the end |
+
+Plus the whole `burn run` flag set. Every threshold is re-checked **before each item**, not only
+at launch, and the stop reason lands in the digest — so "why only 3 of 6" always has an answer.
+
+A real run requires `--dangerously-skip-permissions`: a headless session that hits a permission
+prompt hangs forever, so `burn process` refuses rather than stalling at 2am. Pair it with
+`--sandbox --repo <path>` to keep `implement` writes out of your checkout.
+
 ## `burn overview`
 
 Summarizes the JSONL activity store (`--store`, same default as `run`) grouped by goal: session
-count, total cost, turns, errors, time spent, and first/last run timestamps. Add `--json` for
-scripting. `--wait-for-check` results are appended to the same store as `"kind":"check"` lines
-(PR URL, matched checks, pass/fail) but do not appear in the `overview` table today — read them
-directly from the JSONL if you need them.
+count, total cost, turns, errors, time spent, and first/last run timestamps. `--group item`
+switches to the per-work-item view of `burn process` runs. Add `--json` for scripting.
+`--wait-for-check` results are appended to the same store as `"kind":"check"` lines (PR URL,
+matched checks, pass/fail) but do not appear in the `overview` table today — read them directly
+from the JSONL if you need them.
 
 ## `burn connect`
 
-Verifies and queries an external data source. Today: `burn connect jira --jql "<JQL>"`, which
-shells out to [`acli`](https://developer.atlassian.com/cloud/acli/) (install it and run `acli
-jira auth login` first) and prints matching issues as `KEY<tab>summary` lines.
+Verifies and queries an external data source. Today: `burn connect jira`, which shells out to
+[`acli`](https://developer.atlassian.com/cloud/acli/) (install it and run `acli jira auth login`
+first) and prints matching issues as `KEY<tab>status<tab>summary` lines. Takes the same
+`--project` / `--label` / `--status` / `--query` selection as `burn process` (`--jql` remains an
+alias of `--query`). `burn setup` reports acli's presence and auth as informational `jira
+source:` lines.
 
-## Notifications
+## Notifications and hooks
 
 By default a target hit rings the terminal bell, prints `NOTICE:`, and shows a
-macOS notification. Set `BURN_NOTIFY_CMD` to forward it anywhere — the command
-runs via `sh -c` with the message in `$BURN_MSG`:
+macOS notification. Three env vars forward events anywhere — each runs via `sh -c` with the
+message in `$BURN_MSG`:
+
+| Var | Fires on | Extra env |
+|---|---|---|
+| `BURN_NOTIFY_CMD` | target hit, run headline, each item with `--notify-each` | `BURN_ITEM_*` when per-item |
+| `BURN_DIGEST_CMD` | end of a `burn process` run, full markdown digest (falls back to `BURN_NOTIFY_CMD`) | — |
+| `BURN_CLAIM_CMD` | before each item; **non-zero exit skips it** | `BURN_ITEM_KEY`, `BURN_ITEM_SUMMARY`, `BURN_ITEM_STATUS`, `BURN_ITEM_MODE`, `BURN_ITEM_SOURCE` |
 
 ```sh
 # Slack incoming webhook
@@ -118,6 +179,10 @@ BURN_NOTIFY_CMD='curl -s -XPOST "$SLACK_WEBHOOK" -d "{\"text\":\"$BURN_MSG\"}"' 
 # append to a file another process tails
 BURN_NOTIFY_CMD='echo "$BURN_MSG" >> ~/.claude/burn/alerts.log' burn --watch --target 80
 ```
+
+`BURN_CLAIM_CMD` is how a `burn process` run avoids colliding with another machine: local dedup
+uses the JSONL store, which is per-host, so label the ticket as taken from the hook and exit
+non-zero when someone else already has it.
 
 ## Safety
 
@@ -198,9 +263,31 @@ non-zero on a failed check, the same as any other error — distinguish it
 from a refusal by the printed summary or the `"kind":"check"` store record (see `burn
 overview` above).
 
+## Example: work labelled tickets while you are away
+
+Triage once, label the tickets you are happy for an agent to touch, then let idle quota work
+them overnight or over a weekend:
+
+```sh
+# every weekday at 19:00
+0 19 * * 1-5 /usr/local/bin/burn process jira --project SUDS --label claude-ready \
+  --mode enrich --jobs 2 --target 80 --weekly-target 50 \
+  --max-items 6 --max-errors 2 --max-runtime 4h --dangerously-skip-permissions \
+  --digest "$HOME/.claude/burn/digests/$(date +\%F).md" \
+  >> "$HOME/.claude/burn/process.log" 2>&1
+```
+
+A cron shell has neither your PATH nor your keychain, so use an absolute `burn` path and put
+`CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) in the crontab or a sourced env file. On
+macOS prefer a launchd agent; on Linux a systemd user timer with `Environment=` is cleaner.
+
+Set `BURN_DIGEST_CMD` to post the digest to Slack, `touch ~/.claude/burn/STOP` to stop the loop
+mid-run, and read `burn overview --group item` when you get back.
+
 ## Claude Code plugin
 
-Ships a `/burn` slash command and a project skill (`.claude/skills/burn/`). Install it from any
+Claude Code is the intended entry point. The repo ships `/burn` and `/burn-jira` slash commands
+plus two project skills (`.claude/skills/burn/`, `.claude/skills/burn-jira/`). Install it from any
 Claude Code session — the repo is its own marketplace:
 
 ```sh
@@ -208,8 +295,15 @@ Claude Code session — the repo is its own marketplace:
 /plugin install dont-burn-it-all@dont-burn-it-all
 ```
 
-Then say "burn quota" / "watch my usage" — the skill installs `burn` if missing, runs
-`burn setup`, and drives it (optionally as a background sub-agent tracked with Monitor).
+Then say "burn quota" / "watch my usage" and the `burn` skill installs `burn` if missing, runs
+`burn setup`, and drives it (optionally as a background sub-agent tracked with Monitor). Say
+"work my labelled Jira tickets while I'm out" and the `burn-jira` skill walks the whole
+unattended path: acli auth, agreeing the label, previewing the ticket list, dry-run, bounds,
+Slack digest, scheduling, and the report when you get back.
+
+Slash commands are declared in `.claude-plugin/plugin.json`; the skills live under
+`.claude/skills/`, so a `/plugin install` elsewhere currently ships the commands but not the
+skills — clone the repo (or copy the skill directories) to get those.
 
 ## Development
 
