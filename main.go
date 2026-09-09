@@ -182,7 +182,7 @@ func registerRunFlags(fs *flag.FlagSet, cfg *Config, home string) {
 	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
 	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
 	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
-	fs.StringVar(&cfg.Repo, "repo", "", "local repo: mounted read-write into the sandbox with --sandbox; also becomes the session working dir for `burn process --mode implement` without --sandbox (plain `burn run` always uses --workdir)")
+	fs.StringVar(&cfg.Repo, "repo", "", "local repo: mounted read-write into the sandbox with --sandbox; also becomes the session working dir for 'burn process --mode implement' without --sandbox (plain 'burn run' always uses --workdir)")
 	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
 	fs.StringVar(&cfg.WaitForCheck, "wait-for-check", "", "after launch, wait for PR checks (in --repo under --sandbox, else --workdir) whose name contains this substring and report pass/fail; requires --jobs 1")
 	fs.DurationVar(&cfg.WaitTimeout, "wait-timeout", 30*time.Minute, "give up waiting for --wait-for-check after this long")
