@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,6 +42,31 @@ type Config struct {
 	SandboxImage string
 	Repo         string
 	GHTokenEnv   string
+
+	// ClaudeArgs are extra flags forwarded verbatim to `claude` (everything
+	// after a `--` separator on the command line), e.g. --resume <id>,
+	// --mcp-config <path>. See claudeArgs in runner.go.
+	ClaudeArgs []string
+
+	// WaitForCheck/WaitTimeout drive the post-launch PR-check wait. See checks.go.
+	WaitForCheck string
+	WaitTimeout  time.Duration
+
+	// AWSProfile, when set, mounts ~/.aws read-only into a --sandbox session
+	// and exports AWS_PROFILE there. Host mode needs no flag — it already
+	// inherits the whole env (see childEnv in runner.go).
+	//
+	// This is NOT profile-scoped: the whole ~/.aws directory is mounted
+	// read-only, so a sandboxed agent can `export AWS_PROFILE=<other>` or
+	// `aws --profile <other>` to use any profile present on the host, not
+	// just this one. Read-only protects the files from being changed, not
+	// which profile the sandboxed process is allowed to assume.
+	// ponytail: true per-profile scoping needs resolving just this profile's
+	// credentials host-side (e.g. `aws configure export-credentials`) and
+	// injecting only those into the sandbox instead of mounting the
+	// directory — a bigger change that needs its own live-osb verification,
+	// tracked as a follow-up rather than done here.
+	AWSProfile string
 }
 
 // commandHelp describes each top-level subcommand for printUsage. Later tasks
@@ -158,9 +184,16 @@ func cmdRun(args []string) error {
 	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
 	fs.StringVar(&cfg.Repo, "repo", "", "local repo to mount read-write into the sandbox (--sandbox only; defaults to --workdir)")
 	fs.StringVar(&cfg.GHTokenEnv, "gh-token-env", "GH_TOKEN", "env var holding a GitHub token to forward into the sandbox for PR creation (falls back to 'gh auth token')")
+	fs.StringVar(&cfg.WaitForCheck, "wait-for-check", "", "after launch, wait for PR checks (in --repo under --sandbox, else --workdir) whose name contains this substring and report pass/fail; requires --jobs 1")
+	fs.DurationVar(&cfg.WaitTimeout, "wait-timeout", 30*time.Minute, "give up waiting for --wait-for-check after this long")
+	fs.StringVar(&cfg.AWSProfile, "aws-profile", "", "AWS profile to expose read-only inside a --sandbox session (mounts ~/.aws read-only, exports AWS_PROFILE)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Everything after a `--` separator is forwarded verbatim to `claude`
+	// (--resume, --mcp-config, ...). Go's flag package consumes the `--` and
+	// returns the remainder here.
+	cfg.ClaudeArgs = fs.Args()
 
 	uc, err := newUsageClient()
 	if err != nil {
@@ -195,6 +228,32 @@ func cmdSetup(args []string) error {
 	return setup(sandboxImage)
 }
 
+// envVarNamePattern matches a valid POSIX shell/env variable name. cfg.GHTokenEnv
+// is interpolated into the sandbox entrypoint script as a bare `export NAME=...`
+// target (sandboxEntrypointScript in sandbox.go) — it names a variable, so
+// shell-quoting it (which is for values) wouldn't help; rejecting anything that
+// isn't a plain identifier is what actually closes the injection.
+var envVarNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validateRunFlags checks the flag combinations that don't depend on live
+// usage data — shared by dryRun and doLaunch so a preview never lies about
+// what a real launch would refuse.
+func validateRunFlags(cfg Config) error {
+	if cfg.AWSProfile != "" && !cfg.Sandbox {
+		return fmt.Errorf("--aws-profile only applies to --sandbox sessions — host mode already inherits your env, just export AWS_PROFILE=%s", cfg.AWSProfile)
+	}
+	if !envVarNamePattern.MatchString(cfg.GHTokenEnv) {
+		return fmt.Errorf("--gh-token-env %q is not a valid env var name", cfg.GHTokenEnv)
+	}
+	if resumeInArgs(cfg.ClaudeArgs) && cfg.Jobs > 1 {
+		return fmt.Errorf("--resume with --jobs > 1 would make every parallel job resume the SAME session — pass --jobs 1")
+	}
+	if cfg.WaitForCheck != "" && cfg.Jobs > 1 {
+		return fmt.Errorf("--wait-for-check only supports --jobs 1 (with --jobs > 1 there's no single PR to watch)")
+	}
+	return nil
+}
+
 // breachMessage returns a non-empty reason once usage is at/over a threshold, checking the
 // 5-hour window first, then the 7-day window (weeklyTarget <= 0 disables that check).
 func breachMessage(u Usage, target, weeklyTarget float64) string {
@@ -217,6 +276,9 @@ func dryRun(cfg Config, uc *UsageClient) error {
 		}
 		target = cfg.Repo + " (sandboxed, mounted read-write at /workspace)"
 	}
+	if err := validateRunFlags(cfg); err != nil {
+		return err
+	}
 	u, err := uc.Get()
 	if err != nil {
 		return err
@@ -237,6 +299,15 @@ func dryRun(cfg Config, uc *UsageClient) error {
 	}
 	fmt.Printf("planned           : %d session(s) of model %q in %s\n", cfg.Jobs, cfg.Model, target)
 	fmt.Printf("goal              : %q\n", cfg.Goal)
+	if len(cfg.ClaudeArgs) > 0 {
+		fmt.Printf("claude passthrough: %v\n", cfg.ClaudeArgs)
+	}
+	if cfg.AWSProfile != "" {
+		fmt.Printf("aws profile       : %s (default; mounts ALL profiles in ~/.aws read-only at %s — the sandboxed agent can select any of them, not just this one)\n", cfg.AWSProfile, sandboxAWSMountPath)
+	}
+	if cfg.WaitForCheck != "" {
+		fmt.Printf("wait for check    : %q (timeout %s)\n", cfg.WaitForCheck, cfg.WaitTimeout)
+	}
 	return nil
 }
 
@@ -248,6 +319,9 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 		if err := validateSandboxConfig(&cfg); err != nil {
 			return err
 		}
+	}
+	if err := validateRunFlags(cfg); err != nil {
+		return err
 	}
 	u, err := uc.Get()
 	if err != nil {
@@ -275,6 +349,14 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 	if aerr == nil {
 		fmt.Printf("5-hour usage now %.1f%% — %.1f%% headroom to target %.1f%%\n",
 			after.FiveHour.Utilization, cfg.Target-after.FiveHour.Utilization, cfg.Target)
+	}
+
+	if cfg.WaitForCheck != "" {
+		if res.sessions > 0 && res.errors == res.sessions {
+			fmt.Println("wait-for-check: skipped — every session errored, nothing to check")
+		} else if err := waitForCheck(cfg, store); err != nil {
+			return err
+		}
 	}
 	return nil
 }
