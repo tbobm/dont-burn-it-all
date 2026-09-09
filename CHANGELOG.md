@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.0](https://github.com/tbobm/dont-burn-it-all/compare/v0.3.0...v0.4.0) (2026-09-09)
+
+
+### Features
+
+* add burn process for unattended, label-driven work over a source ([#28](https://github.com/tbobm/dont-burn-it-all/issues/28)) ([1b75abc](https://github.com/tbobm/dont-burn-it-all/commit/1b75abc8edb85208ba66fa73c63973c6d7dc6b52))
+* **cli:** add --skip-preflight flag to bypass metering proof ([#29](https://github.com/tbobm/dont-burn-it-all/issues/29)) ([8748d49](https://github.com/tbobm/dont-burn-it-all/commit/8748d49ffdb84e056b25c6d6bf4ba6ef7585d9bc))
+* forward claude flags, wait-for-check, sandbox AWS access ([#27](https://github.com/tbobm/dont-burn-it-all/issues/27)) ([1e60bf6](https://github.com/tbobm/dont-burn-it-all/commit/1e60bf6c3384680cd7eaea73ea42255c19757ae7))
+
+
+### Bug Fixes
+
+* unescape backticks in --repo help text ([#32](https://github.com/tbobm/dont-burn-it-all/issues/32)) ([9471c44](https://github.com/tbobm/dont-burn-it-all/commit/9471c44039a94029e5c99815b5456e31e8cff65e))
+
 ## [0.3.0](https://github.com/tbobm/dont-burn-it-all/compare/v0.2.0...v0.3.0) (2026-09-01)
 
 
