@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/tbobm/dont-burn-it-all/compare/v0.4.0...v0.5.0) (2026-09-21)
+
+
+### Features
+
+* add --foreground for an attended session before trusting burn unattended ([#33](https://github.com/tbobm/dont-burn-it-all/issues/33)) ([66df87c](https://github.com/tbobm/dont-burn-it-all/commit/66df87c86ab31fac2b114bef3373313cfcd9d904))
+
 ## [0.4.0](https://github.com/tbobm/dont-burn-it-all/compare/v0.3.0...v0.4.0) (2026-09-09)
 
 
