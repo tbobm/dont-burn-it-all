@@ -14,11 +14,14 @@ import (
 )
 
 // GoalSummary aggregates all "session" records sharing one Goal (or, for
-// Overview.Total, across all goals).
+// Overview.Total, across all goals). PartialCost mirrors PartialDuration: it's
+// set when any session in the group ran with --foreground, whose real cost is
+// unknown (not zero) — see Record.Foreground in store.go.
 type GoalSummary struct {
 	Goal            string  `json:"goal"`
 	Sessions        int     `json:"sessions"`
 	CostUSD         float64 `json:"cost_usd"`
+	PartialCost     bool    `json:"partial_cost"`
 	Turns           int     `json:"turns"`
 	Errors          int     `json:"errors"`
 	DurationSeconds float64 `json:"duration_seconds"`
@@ -38,6 +41,7 @@ type goalAcc struct {
 	sessions, turns, errors int
 	cost, durationSec       float64
 	partial                 bool
+	partialCost             bool
 	first, last             time.Time
 }
 
@@ -80,6 +84,9 @@ func aggregate(records []Record, key func(Record) string) Overview {
 		}
 		a.sessions++
 		a.cost += r.CostUSD
+		if r.Foreground {
+			a.partialCost = true
+		}
 		a.turns += r.NumTurns
 		if r.IsError {
 			a.errors++
@@ -125,6 +132,7 @@ func aggregate(records []Record, key func(Record) string) Overview {
 		total.turns += a.turns
 		total.errors += a.errors
 		total.cost += a.cost
+		total.partialCost = total.partialCost || a.partialCost
 		total.durationSec += a.durationSec
 		total.partial = total.partial || a.partial
 		if total.first.IsZero() || (!a.first.IsZero() && a.first.Before(total.first)) {
@@ -143,6 +151,7 @@ func toSummary(goal string, a *goalAcc) GoalSummary {
 		Goal:            goal,
 		Sessions:        a.sessions,
 		CostUSD:         a.cost,
+		PartialCost:     a.partialCost,
 		Turns:           a.turns,
 		Errors:          a.errors,
 		DurationSeconds: a.durationSec,
@@ -256,6 +265,14 @@ func formatGoalRow(g GoalSummary) string {
 	if g.PartialDuration {
 		dur += " (partial)"
 	}
-	return fmt.Sprintf("%s\t%d\t$%.4f\t%d\t%d\t%s\t%s\t%s",
-		goal, g.Sessions, g.CostUSD, g.Turns, g.Errors, dur, g.FirstRun, g.LastRun)
+	cost := fmt.Sprintf("$%.4f", g.CostUSD)
+	if g.PartialCost {
+		if g.CostUSD == 0 {
+			cost = "n/a"
+		} else {
+			cost += " (partial)"
+		}
+	}
+	return fmt.Sprintf("%s\t%d\t%s\t%d\t%d\t%s\t%s\t%s",
+		goal, g.Sessions, cost, g.Turns, g.Errors, dur, g.FirstRun, g.LastRun)
 }

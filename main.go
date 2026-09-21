@@ -36,6 +36,7 @@ type Config struct {
 	AllowBillsAPI   bool
 	SkipPermissions bool
 	SkipPreflight   bool
+	Foreground      bool
 
 	// Sandbox is an opt-in extra (like a Python package extra): none of this is
 	// checked or required unless the flag is set. See sandbox.go.
@@ -182,6 +183,7 @@ func registerRunFlags(fs *flag.FlagSet, cfg *Config, home string) {
 	fs.BoolVar(&cfg.AllowBillsAPI, "i-know-this-bills-api", false, "override the refusal when billing-risk env vars are set")
 	fs.BoolVar(&cfg.SkipPermissions, "dangerously-skip-permissions", false, "run sessions unattended with --dangerously-skip-permissions (opt-in)")
 	fs.BoolVar(&cfg.SkipPreflight, "skip-preflight", false, "skip the subscription-metering proof (risk: a hostile env may bill pay-per-token API undetected)")
+	fs.BoolVar(&cfg.Foreground, "foreground", false, "run one real interactive claude session attached to this terminal (permission prompts included) instead of headless -p, so you can watch it before trusting it unattended; forces --jobs 1, refuses --sandbox/--dangerously-skip-permissions/--max-usd-guard, and reports cost as n/a (see 'burn overview')")
 	fs.BoolVar(&cfg.Sandbox, "sandbox", false, "run sessions in a local OpenSandbox (Docker) instead of on the host — opt-in extra, see 'burn setup'")
 	fs.StringVar(&cfg.SandboxImage, "sandbox-image", "burn-sandbox:latest", "image to use for --sandbox sessions")
 	fs.StringVar(&cfg.Repo, "repo", "", "local repo: mounted read-write into the sandbox with --sandbox; also becomes the session working dir for 'burn process --mode implement' without --sandbox (plain 'burn run' always uses --workdir)")
@@ -264,6 +266,28 @@ func validateRunFlags(cfg Config) error {
 	if cfg.WaitForCheck != "" && cfg.Jobs > 1 {
 		return fmt.Errorf("--wait-for-check only supports --jobs 1 (with --jobs > 1 there's no single PR to watch)")
 	}
+	return validateForegroundConfig(cfg)
+}
+
+// validateForegroundConfig checks the --foreground combination, shared by
+// `burn run` (via validateRunFlags) and `burn process` (via
+// validateProcessConfig) so the two paths can't drift.
+func validateForegroundConfig(cfg Config) error {
+	if !cfg.Foreground {
+		return nil
+	}
+	if cfg.Jobs > 1 {
+		return fmt.Errorf("--foreground only supports --jobs 1 — one terminal can't attach to more than one interactive session")
+	}
+	if cfg.Sandbox {
+		return fmt.Errorf("--foreground doesn't support --sandbox — there is no attached-interactive path through osb today; drop one or the other")
+	}
+	if cfg.SkipPermissions {
+		return fmt.Errorf("--foreground is for watching and approving permission prompts live — --dangerously-skip-permissions would silently suppress them")
+	}
+	if cfg.MaxUSDGuard > 0 {
+		return fmt.Errorf("--max-usd-guard can't be enforced with --foreground — cost is reported as n/a, not a real number (see 'burn overview')")
+	}
 	return nil
 }
 
@@ -321,6 +345,9 @@ func dryRun(cfg Config, uc *UsageClient) error {
 	if cfg.WaitForCheck != "" {
 		fmt.Printf("wait for check    : %q (timeout %s)\n", cfg.WaitForCheck, cfg.WaitTimeout)
 	}
+	if cfg.Foreground {
+		fmt.Println("foreground        : yes (interactive, attached session; turns recovered from the transcript, cost n/a)")
+	}
 	return nil
 }
 
@@ -360,7 +387,11 @@ func doLaunch(cfg Config, uc *UsageClient, store *Store) error {
 	}
 
 	after, aerr := uc.Get()
-	fmt.Printf("done: %d session(s), %d error(s), reported cost $%.4f\n", res.sessions, res.errors, res.costUSD)
+	if cfg.Foreground {
+		fmt.Printf("done: %d session(s), %d error(s), cost n/a (foreground)\n", res.sessions, res.errors)
+	} else {
+		fmt.Printf("done: %d session(s), %d error(s), reported cost $%.4f\n", res.sessions, res.errors, res.costUSD)
+	}
 	if aerr == nil {
 		fmt.Printf("5-hour usage now %.1f%% — %.1f%% headroom to target %.1f%%\n",
 			after.FiveHour.Utilization, cfg.Target-after.FiveHour.Utilization, cfg.Target)

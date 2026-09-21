@@ -10,7 +10,10 @@ import (
 // Record is one line in the JSONL log — either a finished session ("session")
 // or a governor reading ("watch"). ItemKey/ItemSource/Mode are set only by
 // `burn process`, which is what lets a re-run skip work already done and
-// `burn overview --group item` break a run down per work item.
+// `burn overview --group item` break a run down per work item. Foreground
+// marks a session run via --foreground: CostUSD is always 0 there (real cost
+// isn't recoverable without burn maintaining its own pricing table), so
+// `burn overview` renders it as "n/a" instead of a real number.
 type Record struct {
 	TS             string  `json:"ts"`
 	Kind           string  `json:"kind"`
@@ -24,6 +27,7 @@ type Record struct {
 	CostUSD        float64 `json:"cost_usd,omitempty"`
 	NumTurns       int     `json:"num_turns,omitempty"`
 	IsError        bool    `json:"is_error,omitempty"`
+	Foreground     bool    `json:"foreground,omitempty"`
 	FiveHourBefore float64 `json:"five_hour_before,omitempty"`
 	FiveHourAfter  float64 `json:"five_hour_after,omitempty"`
 	SevenDay       float64 `json:"seven_day,omitempty"`

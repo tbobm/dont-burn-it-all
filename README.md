@@ -53,6 +53,7 @@ Pick a `--target` above your current usage, or the launch refuses by design.
 | `--max-turns` | `30` | Max agent turns per session |
 | `--max-usd-guard` | `0` (off) | Abort if reported cost exceeds this $ |
 | `--dangerously-skip-permissions` | `false` | Run sessions unattended (opt-in) |
+| `--foreground` | `false` | Run one real interactive `claude` session attached to this terminal instead of headless — see below |
 | `--i-know-this-bills-api` | `false` | Override the billing-risk env refusal |
 | `--dry-run` | `false` | Print state, spawn nothing |
 | `--sandbox` | `false` | Opt-in extra: run sessions in a local [OpenSandbox](https://github.com/opensandbox-group/OpenSandbox) (Docker) instead of on the host |
@@ -92,6 +93,32 @@ Caveats:
   fresh. `--resume` also refuses `--jobs > 1` (N jobs resuming one session id is meaningless).
 - **`--mcp-config` under `--sandbox`** needs a path that exists **inside** the container — a
   host path won't resolve there.
+
+## `burn run --foreground` — watch a real session before trusting it unattended
+
+Every other launch mode is headless (`claude -p`): no TTY, so a permission prompt would hang
+forever, which is why unattended runs require `--dangerously-skip-permissions`. `--foreground`
+is the opposite: it runs one real, interactive `claude` session attached to this terminal —
+permission prompts included — so you can watch (and approve or deny) a session before ever
+letting it run unattended:
+
+```sh
+burn run --foreground --goal "fix the failing test in pkg/foo"
+```
+
+`--foreground` forces `--jobs 1` and refuses `--sandbox` (no attached-interactive path through
+`osb` today), `--dangerously-skip-permissions` (a human is already present to answer prompts —
+skipping them would defeat the point), and `--max-usd-guard` (see below). Preflight and
+`--skip-preflight` behave exactly as they do headless.
+
+There is no `--output-format json` result to parse from an attached session, so accounting is
+partial: turn count is recovered from the session transcript (found via a `--session-id` burn
+pins up front), but cost is not — reconstructing it from the transcript's raw token counts would
+mean burn maintaining its own per-model pricing table that drifts out of sync with Anthropic's
+actual prices. `burn overview` renders a foreground session's cost as `n/a` (or `$X.XXXX
+(partial)` in a group that mixes foreground and headless sessions) rather than a misleading `$0`.
+`burn process <source> --foreground` works the same way, one attended session per picked item,
+auto-continuing to the next as soon as one exits — see below.
 
 ## `burn process` — unattended work over a backlog
 

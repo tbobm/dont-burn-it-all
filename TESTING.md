@@ -199,3 +199,37 @@ rm ~/.claude/burn/STOP
 An `--mode implement` pass is worth one manual run per change to the implement prompt: confirm
 the PR it opens is a **draft**, on a `claude/<KEY>-*` branch, and that the default branch has no
 new commits.
+
+## 5. `--foreground` smoke test
+
+**Required** before merging any change to `runClaudeForeground`, `newSessionID`,
+`countAssistantTurns`, or `findTranscript` in `runner.go`. Unit tests cover the pure parts
+(UUID format, turn counting against a fixture, transcript globbing against a temp `$HOME`) —
+what they cannot cover is a real attached TTY, which needs a real terminal, not this repo's CI
+or a sandboxed shell.
+
+```sh
+go build -o burn . && go vet ./... && gofmt -l . && go test ./...
+
+# 1. a real attended session — watch it open interactively in THIS terminal
+./burn run --foreground --goal "reply with the single word: ok, then stop"
+#    expect: claude opens interactively (not headless), you see its normal UI,
+#    any permission prompt is real and answerable, "done: ... cost n/a (foreground)"
+#    prints after you exit the session (/exit or Ctrl+C twice)
+
+# 2. turn count actually recovered
+./burn overview
+#    expect: the row for this goal shows a real turn count, cost column "n/a"
+
+# 3. refusals (no live session needed)
+./burn run --foreground --jobs 2 --dry-run --goal x       # expect: refused, --jobs 1 only
+./burn run --foreground --sandbox --repo . --dry-run --goal x   # expect: refused, no osb path
+./burn run --foreground --dangerously-skip-permissions --dry-run --goal x  # expect: refused
+./burn run --foreground --max-usd-guard 5 --dry-run --goal x    # expect: refused
+
+# 4. burn process --foreground over one item, no --dangerously-skip-permissions needed
+./burn process jira --project <KEY> --label <LABEL> --mode enrich --max-items 1 \
+  --foreground --target 90
+#    expect: no refusal for missing --dangerously-skip-permissions; the one picked item's
+#    session opens attached in this terminal; digest/table render its cost as "n/a"
+```

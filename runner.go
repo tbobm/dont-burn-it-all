@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -118,6 +121,9 @@ func resumeInArgs(args []string) bool {
 // stamp is keyed by mode (it is, see stampPath in main.go), so a host-mode
 // proof can never be mistaken for a sandboxed one.
 func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
+	if cfg.Foreground {
+		return runClaudeForeground(cfg, token, prompt)
+	}
 	args := claudeArgs(cfg, prompt)
 
 	var cmd *exec.Cmd
@@ -173,6 +179,97 @@ func runClaude(cfg Config, token, prompt string) (claudeResult, error) {
 	return res, nil
 }
 
+// newSessionID generates a random UUIDv4, in the same format `claude` prints
+// as session_id in a headless result. Pinning one up front (via --session-id)
+// is what lets runClaudeForeground find the session's transcript afterward.
+func newSessionID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// countAssistantTurns counts `"type":"assistant"` lines in a session
+// transcript file — pure and file-based so it's unit-testable against a
+// fixture, separate from findTranscript's globbing.
+func countAssistantTurns(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	turns := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var line struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(sc.Bytes(), &line) == nil && line.Type == "assistant" {
+			turns++
+		}
+	}
+	return turns, sc.Err()
+}
+
+// findTranscript locates a session's transcript by globbing for its id across
+// every project directory under home — sidestepping any need to reproduce
+// Claude Code's own cwd-to-directory-name encoding.
+func findTranscript(home, sessionID string) (string, error) {
+	matches, err := filepath.Glob(filepath.Join(home, ".claude", "projects", "*", sessionID+".jsonl"))
+	if err != nil {
+		return "", err
+	}
+	if len(matches) == 0 {
+		return "", fmt.Errorf("no transcript found for session %s", sessionID)
+	}
+	return matches[0], nil
+}
+
+// runClaudeForeground runs `claude` interactively, attached to this process's
+// own stdio, instead of headless `-p` — the point of --foreground is a human
+// watching, and approving or denying, the session live. There is no
+// --output-format json result to parse afterward: NumTurns is recovered by
+// counting assistant turns in the session transcript, found via the
+// --session-id pinned up front; CostUSD is left at 0 (see Record.Foreground
+// in store.go for why cost is deliberately not reconstructed from the
+// transcript's raw token counts).
+func runClaudeForeground(cfg Config, token, prompt string) (claudeResult, error) {
+	sessionID, err := newSessionID()
+	if err != nil {
+		return claudeResult{}, fmt.Errorf("generating session id: %w", err)
+	}
+
+	args := []string{"--session-id", sessionID, "--model", cfg.Model, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
+	args = append(args, cfg.ClaudeArgs...)
+	args = append(args, "--", prompt)
+
+	cmd := exec.Command("claude", args...)
+	cmd.Env = childEnv(token, false)
+	cmd.Dir = cfg.Workdir
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+
+	runErr := cmd.Run()
+
+	turns := 0
+	if home, herr := os.UserHomeDir(); herr == nil {
+		if path, ferr := findTranscript(home, sessionID); ferr == nil {
+			if n, cerr := countAssistantTurns(path); cerr == nil {
+				turns = n
+			} else {
+				fmt.Fprintf(os.Stderr, "burn: reading transcript for session %s: %v\n", sessionID, cerr)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "burn: could not recover turn count for session %s: %v\n", sessionID, ferr)
+		}
+	}
+	return claudeResult{SessionID: sessionID, NumTurns: turns, IsError: runErr != nil}, runErr
+}
+
 // preflight is the subscription-metering gate. It refuses to run under a hostile
 // env, then empirically proves a single `claude -p` moves the real 5-hour
 // utilization. If it does not move, the burst was billed to API, not the
@@ -201,6 +298,11 @@ func preflight(cfg Config, uc *UsageClient, token string) error {
 	// Never forward passthrough args to the probe — a --resume there would
 	// resume the user's real session for a throwaway "ok" turn.
 	probe.ClaudeArgs = nil
+	// The probe always runs headless, even under --foreground: it's an
+	// internal metering check, not something the human needs to watch, and
+	// its result (a claudeResult with TotalCostUSD/IsError) requires the
+	// headless -p path to exist at all.
+	probe.Foreground = false
 	if _, err := runClaude(probe, token, "Reply with the single word: ok"); err != nil {
 		return fmt.Errorf("preflight probe session failed: %w", err)
 	}
@@ -253,9 +355,12 @@ func launch(cfg Config, uc *UsageClient, token string, store *Store) (launchResu
 			start := time.Now().UTC()
 			// Nonce only defeats identical-prompt server caching; the work is
 			// real. Skip it on --resume — a resumed conversation gets its next
-			// real turn, not a literal "(nonce=N)" tacked onto the goal.
+			// real turn, not a literal "(nonce=N)" tacked onto the goal. Skip it
+			// on --foreground too — a human reads this prompt literally, and
+			// --foreground already forces --jobs 1 so there is no cache
+			// collision to defeat.
 			prompt := cfg.Goal
-			if !resumeInArgs(cfg.ClaudeArgs) {
+			if !resumeInArgs(cfg.ClaudeArgs) && !cfg.Foreground {
 				prompt = fmt.Sprintf("%s (nonce=%d)", cfg.Goal, i)
 			}
 			res, runErr := runClaude(cfg, token, prompt)
@@ -278,6 +383,7 @@ func launch(cfg Config, uc *UsageClient, token string, store *Store) (launchResu
 				NumTurns:       res.NumTurns,
 				IsError:        runErr != nil || res.IsError,
 				FiveHourBefore: beforePct,
+				Foreground:     cfg.Foreground,
 			})
 			if runErr != nil {
 				fmt.Fprintf(os.Stderr, "job %d error: %v\n", i, runErr)
